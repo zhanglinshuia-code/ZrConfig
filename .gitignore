@@ -48,6 +48,7 @@ unity/ZrConfig.Sample/Assets/StreamingAssets/ZrConfig.meta
 !/.github/workflows/ci.yml
 /tests/*
 !/tests/README.md
+!/tests/README.en.md
 !/tests/ZrConfig.Server.Tests/
 /tests/ZrConfig.Server.Tests/*
 !/tests/ZrConfig.Server.Tests/Program.cs

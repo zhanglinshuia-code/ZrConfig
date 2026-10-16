@@ -26,6 +26,7 @@ internal static partial class ReleaseFiles
         "global.json",
         "LICENSE",
         "README.md",
+        "README.en.md",
         "ZrConfig.slnx"
     };
     private static readonly HashSet<string> s_publicDocs = new(StringComparer.Ordinal)
@@ -112,6 +113,14 @@ internal static partial class ReleaseFiles
         }
     }
 
+    private static bool IsPublicDocument(string name)
+    {
+        string canonicalName = name.EndsWith(".en.md", StringComparison.Ordinal)
+            ? name[..^6] + ".md"
+            : name;
+        return s_publicDocs.Contains(canonicalName);
+    }
+
     private static bool Include(string path)
     {
         string[] parts = path.Split('/');
@@ -125,9 +134,9 @@ internal static partial class ReleaseFiles
             return false;
         }
 
-        if(parts[0]=="tests" && path is not ("tests" or "tests/README.md" or "tests/ZrConfig.Server.Tests" or "tests/ZrConfig.Server.Tests/Program.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeBenchmarks.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeScenarios.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeProfiling.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeControlBenchmarks.cs" or "tests/ZrConfig.Server.Tests/SampleConsumers.cs" or "tests/ZrConfig.Server.Tests/ZrConfig.Server.Tests.csproj" or "tests/ZrConfig.Tests" or "tests/ZrConfig.Tests/PortableExportTests.cs" or "tests/ZrConfig.Tests/AdditionalLanguageTests.cs" or "tests/ZrConfig.Tests/ServerRuntimeTests.cs" or "tests/ZrConfig.Tests/GeneratedApiContractTests.cs"))return false;
+        if(parts[0]=="tests" && path is not ("tests" or "tests/README.md" or "tests/README.en.md" or "tests/ZrConfig.Server.Tests" or "tests/ZrConfig.Server.Tests/Program.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeBenchmarks.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeScenarios.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeProfiling.cs" or "tests/ZrConfig.Server.Tests/ServerRuntimeControlBenchmarks.cs" or "tests/ZrConfig.Server.Tests/SampleConsumers.cs" or "tests/ZrConfig.Server.Tests/ZrConfig.Server.Tests.csproj" or "tests/ZrConfig.Tests" or "tests/ZrConfig.Tests/PortableExportTests.cs" or "tests/ZrConfig.Tests/AdditionalLanguageTests.cs" or "tests/ZrConfig.Tests/ServerRuntimeTests.cs" or "tests/ZrConfig.Tests/GeneratedApiContractTests.cs"))return false;
 
-        if (parts[0] == "docs" && parts.Length > 1 && !s_publicDocs.Contains(parts[1]) && path is not "docs/assets" and not "docs/assets/user-guide-example.zip" and not "docs/assets/zrconfig-app.png")
+        if (parts[0] == "docs" && parts.Length > 1 && !IsPublicDocument(parts[1]) && path is not "docs/assets" and not "docs/assets/user-guide-example.zip" and not "docs/assets/zrconfig-app.png")
         {
             return false;
         }
@@ -137,7 +146,7 @@ internal static partial class ReleaseFiles
             return false;
         }
 
-        if (parts[0] == "samples" && parts.Length > 1 && parts[1] is not "Data" and not "README.md" and not "project.zrconfig.json")
+        if (parts[0] == "samples" && parts.Length > 1 && parts[1] is not "Data" and not "README.md" and not "README.en.md" and not "project.zrconfig.json")
         {
             return false;
         }
