@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>netstandard2.1</TargetFramework>
+        <ImplicitUsings>disable</ImplicitUsings>
+        <LangVersion>9.0</LangVersion>
+        <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    </PropertyGroup>
+    <ItemGroup>
+        <ProjectReference Include="../ZrConfig.Runtime/ZrConfig.Runtime.csproj" />
+    </ItemGroup>
+    <ItemGroup>
+        <Compile Include="../../unity/ZrConfig.Sample/Assets/ZrConfig/Validation/**/*.cs" Link="%(RecursiveDir)%(Filename)%(Extension)" />
+    </ItemGroup>
+</Project>

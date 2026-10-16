@@ -1,0 +1,9 @@
+{
+    "name": "ZrConfig.Models",
+    "rootNamespace": "ZrConfig.Models",
+    "references": [
+        "ZrConfig.Runtime"
+    ],
+    "autoReferenced": true,
+    "noEngineReferences": true
+}

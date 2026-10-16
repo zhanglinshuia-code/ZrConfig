@@ -1,0 +1,137 @@
+name: Build and verify
+on:
+    push:
+    pull_request:
+    workflow_dispatch:
+permissions:
+    contents: read
+jobs:
+    verify:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [macos-latest, windows-latest]
+        runs-on: ${{ matrix.os }}
+        steps:
+            - uses: actions/checkout@v7
+            - uses: actions/setup-dotnet@v6
+              with:
+                  dotnet-version: '10.0.x'
+            - name: Check portable source
+              shell: pwsh
+              run: ./scripts/maintain.ps1 check-portability
+            - name: Verify public source
+              shell: pwsh
+              run: ./scripts/maintain.ps1 verify-source
+            - name: Create source distribution
+              shell: pwsh
+              run: ./scripts/maintain.ps1 package-source
+    server-contracts:
+        strategy:
+            fail-fast: false
+            matrix:
+                os: [ubuntu-latest, windows-latest, macos-latest]
+                profile: [minimum, current]
+        runs-on: ${{ matrix.os }}
+        timeout-minutes: 35
+        steps:
+            - uses: actions/checkout@v7
+              with:
+                  fetch-depth: 0
+            - uses: actions/setup-dotnet@v6
+              with:
+                  dotnet-version: '10.0.x'
+            - uses: actions/setup-java@v5
+              with:
+                  distribution: temurin
+                  java-version: ${{ matrix.profile == 'minimum' && '17' || '25' }}
+            - uses: actions/setup-go@v6
+              with:
+                  go-version: ${{ matrix.profile == 'minimum' && '1.19.x' || 'stable' }}
+                  cache: false
+            - uses: actions/setup-node@v5
+              with:
+                  node-version: ${{ matrix.profile == 'minimum' && '22' || '26' }}
+            - name: Install isolated compiler profiles
+              shell: pwsh
+              env:
+                  PROFILE: ${{ matrix.profile }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $rust = if ($env:PROFILE -eq 'minimum') { '1.70.0' } else { 'stable' }
+                  rustup toolchain install $rust --profile minimal
+                  if ($LASTEXITCODE -ne 0) { throw 'rustup failed' }
+                  $rustc = rustup which --toolchain $rust rustc
+                  "ZRCONFIG_RUSTC=$rustc" >> $env:GITHUB_ENV
+                  $typescript = if ($env:PROFILE -eq 'minimum') { '5.8.3' } else { 'latest' }
+                  npm install --prefix "$env:RUNNER_TEMP/ts-profile" --ignore-scripts --no-audit --no-fund "typescript@$typescript"
+                  if ($LASTEXITCODE -ne 0) { throw 'TypeScript install failed' }
+                  "ZRCONFIG_TYPESCRIPT=$env:RUNNER_TEMP/ts-profile/node_modules/typescript/lib/typescript.js" >> $env:GITHUB_ENV
+                  if ($IsWindows) {
+                      $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
+                      if (!$gcc) {
+                          choco install mingw --yes --no-progress
+                          if ($LASTEXITCODE -ne 0) { throw 'MinGW install failed' }
+                          $machinePath = [Environment]::GetEnvironmentVariable('Path','Machine')
+                          $env:PATH = "$machinePath;$env:PATH"
+                          $gcc = Get-Command gcc.exe -ErrorAction Stop
+                      }
+                      $nativeBin = Split-Path $gcc.Source
+                      $nativeBin >> $env:GITHUB_PATH
+                      $env:ZRCONFIG_CC = $gcc.Source
+                      "ZRCONFIG_CC=$($gcc.Source)" >> $env:GITHUB_ENV
+                      "ZRCONFIG_CXX=$(Join-Path $nativeBin 'g++.exe')" >> $env:GITHUB_ENV
+                      "CC=$($gcc.Source)" >> $env:GITHUB_ENV
+                  }
+                  $lua = if ($env:PROFILE -eq 'minimum') { '5.4.0' } else { '5.4.9' }
+                  ./scripts/maintain.ps1 server-lua $lua "$env:RUNNER_TEMP/lua-profile"
+                  if ($LASTEXITCODE -ne 0) { throw 'Lua build failed' }
+                  $luaName = if ($IsWindows) { 'lua.exe' } else { 'lua' }
+                  "ZRCONFIG_LUA=$(Join-Path "$env:RUNNER_TEMP/lua-profile" $luaName)" >> $env:GITHUB_ENV
+            - name: Verify contracts and frozen consumers
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  dotnet run --project tests/ZrConfig.Server.Tests -c Release -p:NuGetAudit=false 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-contracts.log"
+                  if ($LASTEXITCODE -ne 0) { throw 'Server contract verification failed' }
+            - name: MSVC C++17 frozen consumers
+              if: runner.os == 'Windows'
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  $vswhere = "${env:ProgramFiles(x86)}/Microsoft Visual Studio/Installer/vswhere.exe"
+                  $installation = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
+                  if ($LASTEXITCODE -ne 0 -or !$installation) { throw 'MSVC installation missing' }
+                  Import-Module "$installation/Common7/Tools/Microsoft.VisualStudio.DevShell.dll"
+                  Enter-VsDevShell -VsInstallPath $installation -DevCmdArguments '-arch=x64 -host_arch=x64' -SkipAutomaticLocation
+                  $env:ZRCONFIG_CXX = (Get-Command cl.exe -ErrorAction Stop).Source
+                  dotnet run --no-build --project tests/ZrConfig.Server.Tests -c Release 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-msvc.log"
+                  if ($LASTEXITCODE -ne 0) { throw 'MSVC C++17 contract verification failed' }
+            - name: C++ sanitizer acceptance
+              if: runner.os == 'Linux' && matrix.profile == 'current'
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  foreach ($sanitizer in @('address,undefined', 'thread')) {
+                      $env:ZRCONFIG_CPP_SANITIZERS = $sanitizer
+                      dotnet run --no-build --project tests/ZrConfig.Server.Tests -c Release 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-$sanitizer.log"
+                      if ($LASTEXITCODE -ne 0) { throw "C++ $sanitizer verification failed" }
+                  }
+            - name: Compare trusted target baseline
+              if: github.event_name == 'pull_request' || github.event_name == 'push'
+              shell: pwsh
+              env:
+                  TRUSTED_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  if ($env:TRUSTED_BASE -and $env:TRUSTED_BASE -notmatch '^0+$') {
+                      dotnet run --no-build --project tests/ZrConfig.Server.Tests -c Release -- --trusted-ref $env:TRUSTED_BASE 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-trusted-base.log"
+                      if ($LASTEXITCODE -ne 0) { throw 'Trusted API baseline verification failed' }
+                  }
+            - name: Preserve verification evidence
+              if: always()
+              uses: actions/upload-artifact@v4
+              with:
+                  name: server-${{ matrix.os }}-${{ matrix.profile }}
+                  path: ${{ runner.temp }}/server-*.log
+                  if-no-files-found: error

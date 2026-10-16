@@ -1,0 +1,13 @@
+{
+    "name": "ZrConfig.Sample.Rules.Editor",
+    "references": [
+        "ZrConfig.Models",
+        "ZrConfig.Runtime",
+        "ZrConfig.Validation"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "autoReferenced": true,
+    "noEngineReferences": true
+}

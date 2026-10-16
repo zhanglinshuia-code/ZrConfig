@@ -1,0 +1,1404 @@
+// zrconfig-api-contract:1
+// 此文件由工具提供。解析和分配集中在加载阶段，查询使用生成的强类型索引。
+package zrconfig
+
+import (
+	"bytes"
+	"context"
+	"crypto/sha256"
+	"encoding/binary"
+	"encoding/hex"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"math"
+	"math/big"
+	"os"
+	"path/filepath"
+	"runtime"
+	"strconv"
+	"sort"
+	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
+	"unicode/utf8"
+)
+
+const maxRows = 5000000
+const maxElements = 1000000
+
+// New server family; legacy error and panic contracts are preserved by their existing entry points.
+type ErrorCode string
+const (
+	InternalError ErrorCode = "InternalError"
+	NotInitialized ErrorCode = "NotInitialized"
+	ManagerClosed ErrorCode = "ManagerClosed"
+	ReloadBusy ErrorCode = "ReloadBusy"
+	StaleCandidate ErrorCode = "StaleCandidate"
+	AlreadyCommitted ErrorCode = "AlreadyCommitted"
+	ForeignCandidate ErrorCode = "ForeignCandidate"
+	Cancelled ErrorCode = "Cancelled"
+	DeadlineExceeded ErrorCode = "DeadlineExceeded"
+	InvalidPlan ErrorCode = "InvalidPlan"
+	InvalidValue ErrorCode = "InvalidValue"
+	LimitExceeded ErrorCode = "LimitExceeded"
+	BudgetExceeded ErrorCode = "BudgetExceeded"
+	KeyNotFound ErrorCode = "KeyNotFound"
+	MissingReference ErrorCode = "MissingReference"
+	UnsupportedCapability ErrorCode = "UnsupportedCapability"
+	TableSetMismatch ErrorCode = "TableSetMismatch"
+	SchemaMismatch ErrorCode = "SchemaMismatch"
+	CatalogMismatch ErrorCode = "CatalogMismatch"
+	TableNotSelected ErrorCode = "TableNotSelected"
+	TableNotLoaded ErrorCode = "TableNotLoaded"
+	RowNotLoaded ErrorCode = "RowNotLoaded"
+	IntegrityMismatch ErrorCode = "IntegrityMismatch"
+	ReadFailed ErrorCode = "ReadFailed"
+	InvalidEncoding ErrorCode = "InvalidEncoding"
+	InvalidManifest ErrorCode = "InvalidManifest"
+	UnsupportedFormat ErrorCode = "UnsupportedFormat"
+	VersionIdentityConflict ErrorCode = "VersionIdentityConflict"
+)
+type ConfigError struct { Code ErrorCode; Stage string; OperationID uint64; Version,Table,Key,Field,RelativePath string; Cause error }
+func(e *ConfigError)Error()string { if e.Cause!=nil{return string(e.Code)+": "+e.Cause.Error()};return string(e.Code) }
+func(e *ConfigError)Unwrap()error{return e.Cause}
+func locateError(err error,stage,version,table,key,field,path string)error{if value,ok:=err.(*ConfigError);ok{copy:=*value;if copy.Stage==""{copy.Stage=stage};if copy.Version==""{copy.Version=version};if copy.Table==""{copy.Table=table};if copy.Key==""{copy.Key=key};if copy.Field==""{copy.Field=field};if copy.RelativePath==""{copy.RelativePath=path};return &copy};return err}
+// Copy diagnostic failures when crossing the cache boundary. Callers may mutate exported Go error fields.
+func copyFailure(err error)error{if e,ok:=err.(*ConfigError);ok{value:=*e;value.Cause=copyFailure(e.Cause);return &value};return err}
+func serverError(code ErrorCode)error{return &ConfigError{Code:code}}
+func checkContext(ctx context.Context)error{
+	if ctx==nil{return serverError(InvalidPlan)}
+	if err:=ctx.Err();err!=nil{code:=Cancelled;if err==context.DeadlineExceeded{code=DeadlineExceeded};return &ConfigError{Code:code,Cause:err}}
+	return nil
+}
+// ResourceLimits is copied and validated before any source operation. Use defaults
+// then tighten fields; a zero struct selects defaults for source-compatible plans.
+type ResourceLimits struct {
+    MaxManifestBytes,MaxTableBytes,MaxBundleBytes int64
+    MaxTables,MaxRows,MaxDecodedRows,MaxContainerElements,MaxDepth,MaxStringBytes int
+    MaxConcurrentReads,MaxConcurrentDecodes,MaxPendingRequests int
+    MaxEstimatedDecodedBytes int64
+    MaxEstimatedIndexBytes int64
+}
+func DefaultResourceLimits()ResourceLimits{return ResourceLimits{16<<20,512<<20,1<<30,100000,maxRows,maxRows,maxElements,64,16<<20,1,1,4096,2<<30,2<<30}}
+func(l ResourceLimits)validated()(ResourceLimits,error){
+    if l==(ResourceLimits{}){l=DefaultResourceLimits()}
+    if l.MaxEstimatedIndexBytes==0{l.MaxEstimatedIndexBytes=2<<30}
+    if l.MaxEstimatedIndexBytes<0||l.MaxManifestBytes<=0||l.MaxTableBytes<=0||l.MaxBundleBytes<=0||l.MaxTables<=0||l.MaxRows<=0||l.MaxDecodedRows<=0||l.MaxContainerElements<=0||l.MaxDepth<=0||l.MaxStringBytes<=0||l.MaxConcurrentReads<=0||l.MaxConcurrentDecodes<=0||l.MaxPendingRequests<=0||l.MaxEstimatedDecodedBytes<=0{return l,serverError(InvalidPlan)}
+    if l.MaxRows>maxRows||l.MaxDecodedRows>maxRows||l.MaxContainerElements>maxElements||l.MaxDepth>64||l.MaxStringBytes>16<<20{return l,serverError(UnsupportedCapability)}
+    return l,nil
+}
+// Sources are caller owned. Read may block and must honor ctx between I/O chunks.
+// Runtime copies returned buffers; it never closes the source or retries reads.
+type ConfigSource interface { Read(context.Context,string,int64)([]byte,error) }
+type MemoryConfigSource struct{files map[string][]byte}
+func NewMemoryConfigSource(files map[string][]byte)(*MemoryConfigSource,error){
+    next:=&MemoryConfigSource{files:make(map[string][]byte,len(files))};for name,data:=range files{if !validRelativePath(name){return nil,serverError(InvalidPlan)};next.files[name]=append([]byte(nil),data...)};return next,nil
+}
+func(s *MemoryConfigSource)Read(ctx context.Context,name string,maximum int64)([]byte,error){
+    if err:=checkContext(ctx);err!=nil{return nil,err};if s==nil||!validRelativePath(name)||maximum<=0{return nil,serverError(InvalidPlan)}
+    data,ok:=s.files[name];if !ok{return nil,&ConfigError{Code:ReadFailed,Stage:"read",Cause:os.ErrNotExist}};if int64(len(data))>maximum{return nil,serverError(LimitExceeded)};return append([]byte(nil),data...),nil
+}
+type FileConfigSource struct{root string}
+func NewFileConfigSource(root string)(*FileConfigSource,error){
+    if root==""{return nil,serverError(InvalidPlan)};absolute,err:=filepath.Abs(root);if err!=nil{return nil,&ConfigError{Code:ReadFailed,Cause:err}};return &FileConfigSource{root:filepath.Clean(absolute)},nil
+}
+func validRelativePath(name string)bool{
+    if name==""||strings.ContainsAny(name,"\\:\x00")||strings.HasPrefix(name,"/"){return false};for _,part:=range strings.Split(name,"/"){if part==""||strings.HasPrefix(part,"."){return false}};return true
+}
+func noPathLinks(path string)error{
+    for current:=path;;current=filepath.Dir(current){info,err:=os.Lstat(current);if err!=nil{return &ConfigError{Code:ReadFailed,Stage:"read",Cause:err}};if info.Mode()&os.ModeSymlink!=0{return &ConfigError{Code:ReadFailed,Stage:"path",Cause:fmt.Errorf("symbolic link is not permitted: %s",current)}};if parent:=filepath.Dir(current);parent==current{break}};return nil
+}
+func(s *FileConfigSource)Read(ctx context.Context,name string,maximum int64)([]byte,error){
+    if err:=checkContext(ctx);err!=nil{return nil,err};if s==nil||!validRelativePath(name)||maximum<=0{return nil,serverError(InvalidPlan)}
+    rootInfo,err:=os.Lstat(s.root);if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"path",Cause:err}};if !rootInfo.IsDir()||rootInfo.Mode()&os.ModeSymlink!=0{return nil,serverError(ReadFailed)}
+    // Resolve trusted platform aliases above the chosen root (macOS /var, /tmp).
+    // The chosen root itself and every descendant must remain real directories/files.
+    canonical,err:=filepath.EvalSymlinks(s.root);if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"path",Cause:err}};path:=filepath.Join(canonical,filepath.FromSlash(name));if err:=noPathLinks(path);err!=nil{return nil,err}
+    file,err:=os.Open(path);if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"read",Cause:err}};defer file.Close()
+    before,err:=file.Stat();if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"read",Cause:err}}
+    if !before.Mode().IsRegular(){return nil,serverError(ReadFailed)};if before.Size()<0||before.Size()>maximum||uint64(before.Size())>uint64(^uint(0)>>1){return nil,serverError(LimitExceeded)}
+    data:=make([]byte,int(before.Size()));for offset:=0;offset<len(data);{if err:=checkContext(ctx);err!=nil{return nil,err};chunk:=len(data)-offset;if chunk>1<<20{chunk=1<<20};end:=offset+chunk;n,err:=file.Read(data[offset:end]);offset+=n;if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"read",Cause:err}};if n==0{return nil,serverError(ReadFailed)}}
+    if err:=checkContext(ctx);err!=nil{return nil,err};var extra [1]byte;n,err:=file.Read(extra[:]);if n!=0||err!=io.EOF{return nil,serverError(ReadFailed)}
+    after,err:=os.Lstat(path);if err!=nil{return nil,&ConfigError{Code:ReadFailed,Stage:"read",Cause:err}};if !os.SameFile(before,after)||after.Size()!=before.Size()||!after.ModTime().Equal(before.ModTime()){return nil,serverError(ReadFailed)};if err=noPathLinks(path);err!=nil{return nil,err};rootAfter,err:=os.Lstat(s.root);if err!=nil||!os.SameFile(rootInfo,rootAfter){return nil,serverError(ReadFailed)};return data,nil
+}
+type SnapshotDiagnostics struct{ReadBytes,RetainedRawBytes,EstimatedDecodedBytes,EstimatedIndexBytes int64;DeclaredRows,DecodedRows,ActiveDecodes,PendingJobs,PendingWaiters int;MergedRequests,FaultedRows,FaultedIndexes uint64;Health string}
+type loadBudget struct{gate sync.Mutex;limits ResourceLimits;readBytes,rawBytes,estimated,indexEstimated int64;rows,decoded,decodes,jobs,waiters int;merged,faults,indexFaults uint64}
+func(b *loadBudget)diagnostics()SnapshotDiagnostics{b.gate.Lock();defer b.gate.Unlock();health:="Healthy";if b.faults!=0||b.indexFaults!=0{health="Degraded"};return SnapshotDiagnostics{b.readBytes,b.rawBytes,b.estimated,b.indexEstimated,b.rows,b.decoded,b.decodes,b.jobs,b.waiters,b.merged,b.faults,b.indexFaults,health}}
+func(b *loadBudget)chargeRead(count int)error{b.gate.Lock();defer b.gate.Unlock();if int64(count)>b.limits.MaxBundleBytes-b.readBytes{return serverError(LimitExceeded)};b.readBytes+=int64(count);return nil}
+func(b *loadBudget)chargeRows(count int)error{b.gate.Lock();defer b.gate.Unlock();if count>b.limits.MaxRows-b.rows{return serverError(LimitExceeded)};b.rows+=count;return nil}
+func(b *loadBudget)reserveIndex(estimate int64)error{b.gate.Lock();defer b.gate.Unlock();if estimate<0||estimate>b.limits.MaxEstimatedIndexBytes-b.indexEstimated{return &ConfigError{Code:BudgetExceeded,Stage:"group"}};b.indexEstimated+=estimate;return nil}
+func(b *loadBudget)releaseIndex(estimate int64){b.gate.Lock();b.indexEstimated-=estimate;b.gate.Unlock()}
+func(b *loadBudget)reserve(estimate int64)error{b.gate.Lock();defer b.gate.Unlock();if b.decodes>=b.limits.MaxConcurrentDecodes||b.decoded>=b.limits.MaxDecodedRows||estimate>b.limits.MaxEstimatedDecodedBytes-b.estimated{return serverError(LimitExceeded)};b.decodes++;b.decoded++;b.estimated+=estimate;return nil}
+func(b *loadBudget)reserveTransient(estimate int64)error{b.gate.Lock();defer b.gate.Unlock();if b.decodes>=b.limits.MaxConcurrentDecodes||estimate>b.limits.MaxEstimatedDecodedBytes-b.estimated{return serverError(LimitExceeded)};b.decodes++;b.estimated+=estimate;return nil}
+func(b *loadBudget)finishTransient(estimate int64){b.gate.Lock();b.decodes--;b.estimated-=estimate;b.gate.Unlock()}
+func(b *loadBudget)finish(estimate int64,success,terminal bool){b.gate.Lock();defer b.gate.Unlock();b.decodes--;if !success{b.decoded--;b.estimated-=estimate};if terminal{b.faults++}}
+func(b *loadBudget)admit(job bool)error{b.gate.Lock();defer b.gate.Unlock();if job{if b.jobs>=b.limits.MaxPendingRequests{return serverError(LimitExceeded)};b.jobs++}else{if b.waiters>=b.limits.MaxPendingRequests{return serverError(LimitExceeded)};b.waiters++;b.merged++};return nil}
+func(b *loadBudget)release(job bool){b.gate.Lock();defer b.gate.Unlock();if job{b.jobs--}else{b.waiters--}}
+func terminalRowError(err error)bool{if e,ok:=err.(*ConfigError);ok{switch e.Code{case InvalidValue,InvalidEncoding,MissingReference,SchemaMismatch,IntegrityMismatch:return true}};return false}
+
+type PreparationOptions struct { Timeout time.Duration; CandidateLifetime time.Duration }
+func DefaultPreparationOptions()PreparationOptions{return PreparationOptions{Timeout:5*time.Minute,CandidateLifetime:5*time.Minute}}
+type ManagerPhase string
+const ( Empty ManagerPhase="Empty"; Ready ManagerPhase="Ready"; Closed ManagerPhase="Closed" )
+type TableDescriptor struct { name,schemaHash string; dependencies List[string]; component int }
+func(t TableDescriptor)Name()string{return t.name}
+func(t TableDescriptor)SchemaHash()string{return t.schemaHash}
+func(t TableDescriptor)Dependencies()List[string]{return t.dependencies}
+func(t TableDescriptor)Component()int{return t.component}
+type SelectionPlan struct { requested,tables List[string]; fingerprint string }
+func(p SelectionPlan)RequestedTables()List[string]{return p.requested}
+func(p SelectionPlan)Tables()List[string]{return p.tables}
+func(p SelectionPlan)CatalogFingerprint()string{return p.fingerprint}
+type Catalog struct { fingerprint string;target string; tables List[TableDescriptor]; names map[string]TableDescriptor; components map[int][]TableDescriptor }
+func(c *Catalog)Fingerprint()string{return c.fingerprint}
+func(c *Catalog)Tables()List[TableDescriptor]{return c.tables}
+func newCatalog(source string)*Catalog{
+	definition:=parseJSON([]byte(source));format:=signed(field(definition,"format"),32);if format!=1&&format!=2{panic(serverError(InvalidPlan))}
+    if format==2{supported:=map[string]bool{"binary-v4":true,"json-v1":true,"server-default":true,"selected-closure":true,"lazy-strict":true,"lazy-on-access":true,"fixed-source-bytes":true,"snapshot-owned-handles":true,"explicit-reference-load":true,"row-cache":true,"group-cache":true,"typed-warmup":true,"bounded-source":true,"structured-errors":true,"manager-lifecycle":true};if text(field(definition,"runtimeContract"))!="server-v1"{panic(serverError(UnsupportedCapability))};for _,value:=range array(field(definition,"requiredCapabilities")){if !supported[text(value)]{panic(serverError(UnsupportedCapability))}}}
+	c:=&Catalog{fingerprint:text(field(definition,"fingerprint")),names:map[string]TableDescriptor{},components:map[int][]TableDescriptor{}}
+    if target,ok:=object(definition)["target"].(string);ok{c.target=target}
+	for _,value:=range array(field(definition,"tables")){
+		t:=TableDescriptor{name:text(field(value,"name")),schemaHash:text(field(value,"schemaHash")),component:int(signed(field(value,"component"),32))}
+		for _,dependency:=range array(field(value,"dependencies")){t.dependencies.values=append(t.dependencies.values,text(dependency))}
+		if _,ok:=c.names[t.name];ok{panic(serverError(CatalogMismatch))};c.names[t.name]=t;c.tables.values=append(c.tables.values,t);c.components[t.component]=append(c.components[t.component],t)
+	}
+	for _,t:=range c.tables.values{for _,name:=range t.dependencies.values{if _,ok:=c.names[name];!ok{panic(serverError(CatalogMismatch))}}}
+	return c
+}
+func(c *Catalog)Select(requested []string)(SelectionPlan,error){
+	input:=append([]string(nil),requested...);queue:=append([]string(nil),input...);selected:=map[string]bool{};components:=map[int]bool{}
+	for i:=0;i<len(queue);i++{name:=queue[i];table,ok:=c.names[name];if !ok{return SelectionPlan{},&ConfigError{Code:InvalidPlan,Cause:fmt.Errorf("unknown selected table: %s",name)}};if components[table.component]{continue};components[table.component]=true
+		for _,member:=range c.components[table.component]{selected[member.name]=true;queue=append(queue,member.dependencies.values...)}
+	}
+	result:=SelectionPlan{requested:List[string]{input},fingerprint:c.fingerprint}
+	for _,table:=range c.tables.values{if selected[table.name]{result.tables.values=append(result.tables.values,table.name)}}
+	return result,nil
+}
+type ManagerStatus struct { Phase ManagerPhase; Generation uint64; PreparingOperation uint64 }
+type SnapshotIdentity struct{SourceNamespace,Version,ManifestDigest string}
+type ManagerEvent struct{Kind string;Generation,OperationID uint64;Version string;Code ErrorCode}
+type EventDiagnostics struct{Dropped,ListenerFailures uint64;Queued,Subscribers int}
+// SnapshotMemory is a leaf GC marker, never a resource finalizer or an owner of its snapshot.
+// Managers retain its accounting state only. Collection is delayed and therefore admission is conservative.
+// A custom snapshot must retain this marker for its entire lifetime and share it with all of its views.
+// The generated snapshot does this automatically. Do not copy a SnapshotMemory value.
+type SnapshotMemory struct{account *snapshotMemoryAccount; padding [16]byte}
+type snapshotMemoryAccount struct{released atomic.Bool;estimate atomic.Uint64;budget *loadBudget}
+func NewSnapshotMemory(estimatedBytes uint64)*SnapshotMemory{m:=&SnapshotMemory{account:&snapshotMemoryAccount{}};m.account.estimate.Store(estimatedBytes);runtime.SetFinalizer(m,func(marker *SnapshotMemory){marker.account.released.Store(true)});return m}
+func(m *SnapshotMemory)SetEstimatedBytes(value uint64){m.account.estimate.Store(value);runtime.KeepAlive(m)}
+func newBudgetSnapshotMemory(budget *loadBudget)*SnapshotMemory{m:=NewSnapshotMemory(0);m.account.budget=budget;return m}
+func(a *snapshotMemoryAccount)bytes()uint64{if a.budget!=nil{d:=a.budget.diagnostics();return d.EstimatedLiveBytes()};return a.estimate.Load()}
+func(d SnapshotDiagnostics)EstimatedLiveBytes()uint64{total:=uint64(d.RetainedRawBytes);rows:=uint64(d.DeclaredRows);if rows>(^uint64(0)-total)/64{return ^uint64(0)};total+=rows*64;indexes:=uint64(d.EstimatedIndexBytes);if indexes>^uint64(0)-total{return ^uint64(0)};total+=indexes;decoded:=uint64(d.EstimatedDecodedBytes);if decoded>^uint64(0)-total{return ^uint64(0)};return total+decoded}
+type snapshotMemoryProvider interface{SnapshotMemory()*SnapshotMemory}
+type ManagerPolicy[S any] struct{MaxEstimatedLiveBytes uint64;MaxTrackedSnapshots int;MaxPendingPreparations int;Identity func(*S)(SnapshotIdentity,error);Validators []func(context.Context,*S)error;EventCapacity,MaxVersionIdentities int}
+type managerEvents struct{gate sync.Mutex;capacity int;queue []ManagerEvent;listeners map[uint64]func(ManagerEvent);serial uint64;draining bool;dropped,failures uint64}
+func(e *managerEvents)subscribe(listener func(ManagerEvent))(func(),error){
+    if listener==nil{return nil,serverError(InvalidPlan)};e.gate.Lock();if e.serial==^uint64(0){e.gate.Unlock();return nil,serverError(LimitExceeded)};e.serial++;id:=e.serial;e.listeners[id]=listener;e.gate.Unlock()
+    var once sync.Once;return func(){once.Do(func(){e.gate.Lock();delete(e.listeners,id);e.gate.Unlock()})},nil
+}
+func(e *managerEvents)enqueue(event ManagerEvent){
+    e.gate.Lock();defer e.gate.Unlock();if len(e.queue)==e.capacity{copy(e.queue,e.queue[1:]);e.queue=e.queue[:len(e.queue)-1];e.dropped++};e.queue=append(e.queue,event)
+}
+func(e *managerEvents)emit(event ManagerEvent){e.enqueue(event);e.drain()}
+func(e *managerEvents)drain(){
+    e.gate.Lock();if e.draining{e.gate.Unlock();return};e.draining=true
+    for len(e.queue)>0{event:=e.queue[0];copy(e.queue,e.queue[1:]);e.queue[len(e.queue)-1]=ManagerEvent{};e.queue=e.queue[:len(e.queue)-1];ids:=make([]uint64,0,len(e.listeners));for id:=range e.listeners{ids=append(ids,id)};sort.Slice(ids,func(i,j int)bool{return ids[i]<ids[j]});callbacks:=make([]func(ManagerEvent),0,len(ids));for _,id:=range ids{callbacks=append(callbacks,e.listeners[id])};e.gate.Unlock()
+        for _,callback:=range callbacks{func(){defer func(){if recover()!=nil{e.gate.Lock();e.failures++;e.gate.Unlock()}}();callback(event)}()};e.gate.Lock()
+    };e.draining=false;e.gate.Unlock()
+}
+// StageTiming uses monotonic elapsed time including waits, excluding callbacks. OperationID zero means no sample.
+type StageTiming struct{ Stage string; OperationID uint64; ElapsedMilliseconds float64; Succeeded bool }
+type serverIdentity struct { marker byte }
+type ServerManager[S any] struct {
+    gate sync.Mutex
+    current atomic.Pointer[S]
+    closed atomic.Bool
+    identity *serverIdentity
+    generation,serial,pending uint64
+    building bool
+    prepareTiming,commitTiming StageTiming
+    active int
+    operationCancel context.CancelFunc
+    expires time.Time
+    pendingReleased *atomic.Bool
+    policy ManagerPolicy[S]
+    live []*snapshotMemoryAccount
+    identities map[[2]string]string
+    identityOrder [][2]string
+    eventsOnce sync.Once
+    events *managerEvents
+}
+func NewServerManager[S any](policy ManagerPolicy[S])(*ServerManager[S],error){
+    if policy.MaxTrackedSnapshots==0{policy.MaxTrackedSnapshots=1024};if policy.MaxTrackedSnapshots<1{return nil,serverError(InvalidPlan)}
+    if policy.MaxEstimatedLiveBytes!=0{var shape *S;if _,ok:=any(shape).(snapshotMemoryProvider);!ok{return nil,serverError(UnsupportedCapability)}}
+    if policy.MaxPendingPreparations==0{policy.MaxPendingPreparations=64};if policy.MaxPendingPreparations<1{return nil,serverError(InvalidPlan)};if policy.EventCapacity==0{policy.EventCapacity=64};if policy.MaxVersionIdentities==0{policy.MaxVersionIdentities=32}
+    if policy.EventCapacity<1||policy.MaxVersionIdentities<1{return nil,serverError(InvalidPlan)}
+    policy.Validators=append([]func(context.Context,*S)error(nil),policy.Validators...);for _,validate:=range policy.Validators{if validate==nil{return nil,serverError(InvalidPlan)}}
+    return &ServerManager[S]{policy:policy},nil
+}
+func(m *ServerManager[S])pruneLive(){retained:=m.live[:0];for _,account:=range m.live{if !account.released.Load(){retained=append(retained,account)}};for i:=len(retained);i<len(m.live);i++{m.live[i]=nil};m.live=retained}
+func(m *ServerManager[S])liveUsage(candidate *S,enforce bool)(uint64,error){
+    if m.policy.MaxEstimatedLiveBytes==0{return 0,nil};m.gate.Lock();m.pruneLive();accounts:=append([]*snapshotMemoryAccount(nil),m.live...);m.gate.Unlock()
+    if candidate!=nil{provider,ok:=any(candidate).(snapshotMemoryProvider);if !ok{return 0,serverError(UnsupportedCapability)};marker:=provider.SnapshotMemory();if marker==nil||marker.account==nil{return 0,serverError(InvalidValue)};found:=false;for _,account:=range accounts{if account==marker.account{found=true;break}};if !found{accounts=append(accounts,marker.account)};runtime.KeepAlive(marker)}
+    defer runtime.KeepAlive(candidate);total:=uint64(0);for _,account:=range accounts{value:=account.bytes();if value>^uint64(0)-total{total=^uint64(0)}else{total+=value};if enforce&&total>m.policy.MaxEstimatedLiveBytes{return 0,serverError(BudgetExceeded)}};return total,nil
+}
+// The boolean reports whether a live admission budget is configured. Estimates include GC delay.
+func(m *ServerManager[S])EstimatedLiveBytes()(uint64,bool){value,_:=m.liveUsage(nil,false);return value,m.policy.MaxEstimatedLiveBytes!=0}
+// The marker is resolved before entering the manager gate; custom methods are host code.
+func(m *ServerManager[S])trackLive(account *snapshotMemoryAccount)error{if m.policy.MaxEstimatedLiveBytes==0{return nil};m.pruneLive();for _,old:=range m.live{if old==account{return nil}};if len(m.live)>=m.policy.MaxTrackedSnapshots{return serverError(BudgetExceeded)};m.live=append(m.live,account);return nil}
+func(m *ServerManager[S])eventState()*managerEvents{m.eventsOnce.Do(func(){capacity:=m.policy.EventCapacity;if capacity==0{capacity=64};m.events=&managerEvents{capacity:capacity,listeners:map[uint64]func(ManagerEvent){}}});return m.events}
+func(m *ServerManager[S])Subscribe(listener func(ManagerEvent))(func(),error){return m.eventState().subscribe(listener)}
+func(m *ServerManager[S])StageTimings()[2]StageTiming{m.gate.Lock();defer m.gate.Unlock();a,b:=m.prepareTiming,m.commitTiming;a.Stage="Prepare";b.Stage="Commit";return [2]StageTiming{a,b}}
+func(m *ServerManager[S])EventDiagnostics()EventDiagnostics{e:=m.eventState();e.gate.Lock();defer e.gate.Unlock();return EventDiagnostics{e.dropped,e.failures,len(e.queue),len(e.listeners)}}
+func(m *ServerManager[S])describe(snapshot *S)(SnapshotIdentity,error){
+    var identity SnapshotIdentity;var err error
+    if m.policy.Identity!=nil{identity,err=m.policy.Identity(snapshot)}else if source,ok:=any(snapshot).(interface{Version()string;ManifestDigest()string;SourceNamespace()string});ok{identity=SnapshotIdentity{source.SourceNamespace(),source.Version(),source.ManifestDigest()}}else{return identity,nil}
+    if err!=nil{return identity,err};digest,e:=hex.DecodeString(identity.ManifestDigest);if identity.Version==""||e!=nil||len(digest)!=32{return identity,serverError(InvalidPlan)};identity.ManifestDigest=strings.ToUpper(identity.ManifestDigest);return identity,nil
+}
+// The candidate holds a cancellation ticket, never the manager or its current snapshot.
+// Discard releases snapshot ownership immediately; status/admission prune its ticket.
+type PreparedSnapshot[S any] struct {
+    gate sync.Mutex
+    owner *serverIdentity
+    snapshot *S
+    identity SnapshotIdentity
+    generation,operation uint64
+    expires time.Time
+    committed bool
+    released *atomic.Bool
+}
+func(p *PreparedSnapshot[S])Snapshot()(*S,error){p.gate.Lock();defer p.gate.Unlock();if p.snapshot==nil{return nil,serverError(StaleCandidate)};return p.snapshot,nil}
+func(p *PreparedSnapshot[S])Discard(){p.gate.Lock();p.snapshot=nil;ticket:=p.released;p.gate.Unlock();if ticket!=nil{ticket.Store(true)}}
+type CommitResult[S any] struct { Snapshot *S; Generation uint64; OperationID uint64; Committed bool }
+func(m *ServerManager[S])TryAcquireSnapshot()(*S,error){value:=m.current.Load();if m.closed.Load(){return nil,serverError(ManagerClosed)};return value,nil}
+func(m *ServerManager[S])AcquireSnapshot()(*S,error){value,err:=m.TryAcquireSnapshot();if err!=nil{return nil,err};if value==nil{return nil,serverError(NotInitialized)};return value,nil}
+func(m *ServerManager[S])pruneTicket(){if m.pendingReleased!=nil&&m.pendingReleased.Load(){m.pending=0;m.pendingReleased=nil}}
+func(m *ServerManager[S])Status()ManagerStatus{m.gate.Lock();defer m.gate.Unlock();m.pruneTicket();phase:=Empty;if m.current.Load()!=nil{phase=Ready};if m.closed.Load(){phase=Closed};return ManagerStatus{phase,m.generation,m.pending}}
+func(m *ServerManager[S])Prepare(ctx context.Context,factory func(context.Context)(*S,error),options PreparationOptions)(prepared *PreparedSnapshot[S],err error){
+    if err=checkContext(ctx);err!=nil{return nil,err}
+    if factory==nil||options.Timeout<=0||options.CandidateLifetime<=0{return nil,serverError(InvalidPlan)}
+    now:=time.Now();deadline:=now.Add(options.Timeout)
+    m.gate.Lock();m.pruneTicket()
+    if m.closed.Load(){m.gate.Unlock();return nil,serverError(ManagerClosed)}
+    if m.pending!=0&&(m.building||now.Before(m.expires)){m.gate.Unlock();return nil,serverError(ReloadBusy)}
+    if m.serial==^uint64(0){m.gate.Unlock();return nil,serverError(LimitExceeded)}
+    capacity:=m.policy.MaxPendingPreparations;if capacity==0{capacity=64};if m.active>=capacity{m.gate.Unlock();return nil,serverError(LimitExceeded)}
+    if m.identity==nil{m.identity=&serverIdentity{1}}
+    m.serial++;operation,generation,owner:=m.serial,m.generation,m.identity;m.pending=operation;m.building=true;m.expires=deadline;ticket:=&atomic.Bool{};m.pendingReleased=ticket;m.active++;operationContext,cancel:=context.WithDeadline(ctx,deadline);m.operationCancel=cancel;m.gate.Unlock()
+    // Cleanup also runs for programming panics, without disguising them as data faults.
+    success:=false;defer func(){if !success{m.end(operation);code:=InternalError;if err!=nil{code=InvalidValue;if fault,ok:=err.(*ConfigError);ok{code=fault.Code}};m.eventState().emit(ManagerEvent{Kind:"PrepareFailed",Generation:generation,OperationID:operation,Code:code})}}()
+    defer func(){cancel();m.gate.Lock();m.active--;if operation>=m.prepareTiming.OperationID{m.prepareTiming=StageTiming{"Prepare",operation,float64(time.Since(now))/float64(time.Millisecond),success}};if m.pending==operation{m.operationCancel=nil};m.gate.Unlock()}()
+    if _,err=m.liveUsage(nil,true);err!=nil{return nil,err}
+    next,err:=factory(operationContext);if err!=nil{return nil,err}
+    m.gate.Lock();stale:=m.generation!=generation||m.pending!=operation;m.gate.Unlock();if stale{return nil,serverError(StaleCandidate)}
+    if err=checkContext(operationContext);err!=nil{return nil,err};if next==nil{return nil,serverError(InvalidValue)}
+    for _,validate:=range m.policy.Validators{if err=validate(operationContext,next);err!=nil{return nil,err};if err=checkContext(operationContext);err!=nil{return nil,err}}
+    identity,err:=m.describe(next);if err!=nil{return nil,err};if err=checkContext(operationContext);err!=nil{return nil,err}
+    if _,err=m.liveUsage(next,true);err!=nil{return nil,err};var accounting *snapshotMemoryAccount;if m.policy.MaxEstimatedLiveBytes!=0{marker:=any(next).(snapshotMemoryProvider).SnapshotMemory();if marker==nil||marker.account==nil{return nil,serverError(InvalidValue)};accounting=marker.account;runtime.KeepAlive(marker)}
+    expires:=time.Now().Add(options.CandidateLifetime)
+    m.gate.Lock()
+    if m.closed.Load(){m.gate.Unlock();return nil,serverError(ManagerClosed)}
+    if m.generation!=generation||m.pending!=operation{m.gate.Unlock();return nil,serverError(StaleCandidate)}
+    if identity.ManifestDigest!=""{key:=[2]string{identity.SourceNamespace,identity.Version};if old,ok:=m.identities[key];ok&&old!=identity.ManifestDigest{m.gate.Unlock();return nil,serverError(VersionIdentityConflict)}}
+    if err=m.trackLive(accounting);err!=nil{m.gate.Unlock();return nil,err}
+    m.building=false;m.expires=expires;m.gate.Unlock()
+    prepared=&PreparedSnapshot[S]{owner:owner,snapshot:next,identity:identity,generation:generation,operation:operation,expires:expires,released:ticket};success=true;return prepared,nil
+}
+func(m *ServerManager[S])Commit(ctx context.Context,p *PreparedSnapshot[S])(result CommitResult[S],err error){
+    started:=time.Now()
+    if p==nil{return result,serverError(InvalidPlan)}
+    if m.policy.MaxEstimatedLiveBytes!=0{
+        m.gate.Lock();p.gate.Lock();var invalid ErrorCode
+        if p.owner!=m.identity{invalid=ForeignCandidate}else if m.closed.Load(){invalid=ManagerClosed}else if p.committed{invalid=AlreadyCommitted}else if p.snapshot==nil||p.generation!=m.generation||p.operation!=m.pending{invalid=StaleCandidate};candidate:=p.snapshot;p.gate.Unlock();m.gate.Unlock()
+        if invalid!=""{return result,serverError(invalid)};if _,err=m.liveUsage(candidate,true);err!=nil{return result,err}
+    }
+    // Emit after all locks have been released. Reentrant callbacks cannot change result.
+    defer func(){if result.Committed{m.eventState().drain()}}()
+    m.gate.Lock();defer m.gate.Unlock();p.gate.Lock();defer p.gate.Unlock()
+    if p.owner!=m.identity{return result,serverError(ForeignCandidate)}
+    if m.closed.Load(){return result,serverError(ManagerClosed)}
+    if p.committed{return result,serverError(AlreadyCommitted)}
+    if p.snapshot==nil||p.generation!=m.generation||p.operation!=m.pending{return result,serverError(StaleCandidate)}
+    if err=checkContext(ctx);err!=nil{return result,err}
+    if !time.Now().Before(p.expires){return result,serverError(DeadlineExceeded)}
+    if m.generation==^uint64(0){return result,serverError(LimitExceeded)}
+    if p.identity.ManifestDigest!=""{
+        key:=[2]string{p.identity.SourceNamespace,p.identity.Version};if old,ok:=m.identities[key];ok&&old!=p.identity.ManifestDigest{return result,serverError(VersionIdentityConflict)}
+        if m.identities==nil{m.identities=map[[2]string]string{}}
+        if _,exists:=m.identities[key];!exists{limit:=m.policy.MaxVersionIdentities;if limit==0{limit=32};if len(m.identityOrder)==limit{delete(m.identities,m.identityOrder[0]);copy(m.identityOrder,m.identityOrder[1:]);m.identityOrder=m.identityOrder[:len(m.identityOrder)-1]};m.identityOrder=append(m.identityOrder,key)};m.identities[key]=p.identity.ManifestDigest
+    }
+    m.generation++;m.current.Store(p.snapshot);m.pending=0;m.pendingReleased=nil;p.committed=true
+    m.commitTiming=StageTiming{"Commit",p.operation,float64(time.Since(started))/float64(time.Millisecond),true}
+    m.eventState().enqueue(ManagerEvent{Kind:"Committed",Generation:m.generation,OperationID:p.operation,Version:p.identity.Version})
+    return CommitResult[S]{p.snapshot,m.generation,p.operation,true},nil
+}
+func(m *ServerManager[S])Reload(ctx context.Context,factory func(context.Context)(*S,error),options PreparationOptions)(CommitResult[S],error){p,err:=m.Prepare(ctx,factory,options);if err!=nil{return CommitResult[S]{},err};defer p.Discard();return m.Commit(ctx,p)}
+func(m *ServerManager[S])end(operation uint64){m.gate.Lock();defer m.gate.Unlock();if m.pending==operation{m.pending=0;m.pendingReleased=nil}}
+func(m *ServerManager[S])Clear()error{return m.detach(false)}
+func(m *ServerManager[S])Close()error{return m.detach(true)}
+func(m *ServerManager[S])detach(close bool)error{
+    m.gate.Lock();if m.closed.Load(){m.gate.Unlock();if close{return nil};return serverError(ManagerClosed)};if m.generation==^uint64(0){m.gate.Unlock();return serverError(LimitExceeded)}
+    m.generation++;if close{m.closed.Store(true)};m.current.Store(nil);cancel:=m.operationCancel;m.operationCancel=nil;m.pending=0;m.pendingReleased=nil;generation:=m.generation;kind:="Cleared";if close{kind="Closed"};m.eventState().enqueue(ManagerEvent{Kind:kind,Generation:generation});m.gate.Unlock();if cancel!=nil{cancel()};m.eventState().drain();return nil
+}
+
+type dataFault struct { message string }
+func(e dataFault)Error()string{return "配置数据无效："+e.message}
+func invalid(message string) { panic(dataFault{message}) }
+// Only parser/data/source faults cross the new server error boundary. Programming
+// panics still propagate, rather than being reported as corrupt configuration.
+func recoverServer(err *error){
+	if value:=recover();value!=nil{switch e:=value.(type){
+	case *ConfigError:*err=e
+	case dataFault:*err=&ConfigError{Code:InvalidValue,Cause:e}
+	case *os.PathError:*err=&ConfigError{Code:ReadFailed,Cause:e}
+	case *json.SyntaxError:*err=&ConfigError{Code:InvalidValue,Cause:e}
+	case *strconv.NumError:*err=&ConfigError{Code:InvalidValue,Cause:e}
+	case error:if e==io.EOF||e==io.ErrUnexpectedEOF{*err=&ConfigError{Code:InvalidValue,Cause:e}}else{panic(value)}
+	default:panic(value)
+	}}
+}
+func recoverError(err *error) {
+	if v := recover(); v != nil {
+		if e, ok := v.(error); ok {
+			*err = e
+		} else {
+			*err = fmt.Errorf("配置加载失败：%v", v)
+		}
+	}
+}
+func object(v any) map[string]any {
+	m, ok := v.(map[string]any)
+	if !ok {
+		invalid("需要对象")
+	}
+	return m
+}
+func array(v any) []any {
+	a, ok := v.([]any)
+	if !ok {
+		invalid("需要数组")
+	}
+	return a
+}
+func field(v any, n string) any {
+	x, ok := object(v)[n]
+	if !ok {
+		invalid("缺少成员：" + n)
+	}
+	return x
+}
+func text(v any) string {
+	s, ok := v.(string)
+	if !ok {
+		invalid("需要字符串")
+	}
+	return s
+}
+func number(v any) string {
+	s, ok := v.(json.Number)
+	if !ok {
+		invalid("需要数值")
+	}
+	return string(s)
+}
+func boolean(v any) bool {
+	b, ok := v.(bool)
+	if !ok {
+		invalid("需要 bool")
+	}
+	return b
+}
+func signed(v any, bits int) int64 {
+	var s string
+	if bits == 64 {
+		s = text(v)
+	} else {
+		s = number(v)
+	}
+	n, e := strconv.ParseInt(s, 10, bits)
+	if e != nil {
+		panic(e)
+	}
+	return n
+}
+func unsigned(v any, bits int) uint64 {
+	var s string
+	if bits == 64 {
+		s = text(v)
+	} else {
+		s = number(v)
+	}
+	n, e := strconv.ParseUint(s, 10, bits)
+	if e != nil {
+		panic(e)
+	}
+	return n
+}
+func floating(v any, bits int) float64 {
+	n, e := strconv.ParseFloat(number(v), bits)
+	if e != nil || math.IsNaN(n) || math.IsInf(n, 0) {
+		invalid("浮点数必须有限")
+	}
+	return n
+}
+
+// Decimal 按数值规范化，可直接作为 map 和组合键的值类型；查询无需装箱或临时字符串。
+type Decimal struct{ lo, mid, hi, flags uint32 }
+
+func ParseDecimal(s string) (result Decimal, err error) {
+	defer recoverError(&err)
+	result = decimalValue(s)
+	return
+}
+func decimalValue(s string) Decimal {
+	negative := strings.HasPrefix(s, "-")
+	s = strings.TrimPrefix(strings.TrimPrefix(s, "-"), "+")
+	parts := strings.Split(s, ".")
+	if len(parts) > 2 || len(parts[0]) == 0 {
+		invalid("decimal 格式无效")
+	}
+	scale := 0
+	digits := parts[0]
+	if len(parts) == 2 {
+		scale = len(parts[1])
+		digits += parts[1]
+	}
+	for _, c := range digits {
+		if c < '0' || c > '9' {
+			invalid("decimal 数字无效")
+		}
+	}
+	digits = strings.TrimLeft(digits, "0")
+	if digits == "" {
+		return Decimal{}
+	}
+	for scale > 0 && strings.HasSuffix(digits, "0") {
+		digits = digits[:len(digits)-1]
+		scale--
+	}
+	n, ok := new(big.Int).SetString(digits, 10)
+	if !ok || scale > 28 || n.BitLen() > 96 {
+		invalid("decimal 超出范围")
+	}
+	mask := new(big.Int).SetUint64(0xffffffff)
+	lo := uint32(new(big.Int).And(n, mask).Uint64())
+	n.Rsh(n, 32)
+	mid := uint32(new(big.Int).And(n, mask).Uint64())
+	n.Rsh(n, 32)
+	hi := uint32(n.Uint64())
+	flags := uint32(scale) << 16
+	if negative {
+		flags |= 0x80000000
+	}
+	return Decimal{lo, mid, hi, flags}
+}
+func (v Decimal) String() string {
+	n := new(big.Int).SetUint64(uint64(v.hi))
+	n.Lsh(n, 32).Or(n, new(big.Int).SetUint64(uint64(v.mid)))
+	n.Lsh(n, 32).Or(n, new(big.Int).SetUint64(uint64(v.lo)))
+	s := n.String()
+	scale := int((v.flags >> 16) & 255)
+	if scale > 0 {
+		if len(s) <= scale {
+			s = strings.Repeat("0", scale-len(s)+1) + s
+		}
+		s = s[:len(s)-scale] + "." + s[len(s)-scale:]
+	}
+	if v.flags>>31 != 0 {
+		s = "-" + s
+	}
+	return s
+}
+
+// 只读集合只暴露计数与按位访问，不向业务暴露内部 slice/map 的可变引用。
+type List[T any] struct{ values []T }
+
+func (v List[T]) Len() int   { return len(v.values) }
+func (v List[T]) At(i int) T { return v.values[i] }
+func (v List[T]) Copy() []T  { return append([]T(nil), v.values...) }
+
+type Dictionary[K comparable, V any] struct{ values map[K]V }
+
+func (v Dictionary[K, V]) Len() int             { return len(v.values) }
+func (v Dictionary[K, V]) Find(key K) (V, bool) { x, ok := v.values[key]; return x, ok }
+func (v Dictionary[K, V]) Range(visit func(K, V) bool) {
+	for k, x := range v.values {
+		if !visit(k, x) {
+			return
+		}
+	}
+}
+
+type Optional[T any] struct {
+	value   T
+	present bool
+}
+
+func (v Optional[T]) Value() (T, bool) { return v.value, v.present }
+
+type Matrix[T any] struct {
+	dimensions []int
+	values     List[T]
+}
+
+func (v Matrix[T]) Rank() int              { return len(v.dimensions) }
+func (v Matrix[T]) Dimension(axis int) int { return v.dimensions[axis] }
+func (v Matrix[T]) Values() List[T]        { return v.values }
+func decodeList[T any](v any, decode func(any) T) List[T] {
+	a := array(v)
+	if len(a) > maxElements {
+		invalid("数组过长")
+	}
+	values := make([]T, len(a))
+	for i, x := range a {
+		values[i] = decode(x)
+	}
+	return List[T]{values}
+}
+func decodeOptional[T any](v any, decode func(any) T) Optional[T] {
+	if v == nil {
+		return Optional[T]{}
+	}
+	return Optional[T]{decode(v), true}
+}
+func decodeDictionary[K comparable, V any](v any, key func(any) K, decode func(any) V) Dictionary[K, V] {
+	a := array(v)
+	values := make(map[K]V, len(a))
+	for _, x := range a {
+		pair := array(x)
+		if len(pair) != 2 {
+			invalid("字典条目无效")
+		}
+		k := key(pair[0])
+		if _, ok := values[k]; ok {
+			invalid("字典键重复")
+		}
+		values[k] = decode(pair[1])
+	}
+	return Dictionary[K, V]{values}
+}
+func decodeMatrix[T any](v any, decode func(any) T) Matrix[T] {
+	dims := array(field(v, "dimensions"))
+	d := make([]int, len(dims))
+	count := int64(1)
+	for i, n := range dims {
+		d[i] = int(signed(n, 32))
+		if d[i] < 0 || d[i] > maxElements {
+			invalid("矩阵维度无效")
+		}
+		if count > maxElements && d[i] != 0 {
+			invalid("矩阵过大")
+		}
+		count *= int64(d[i])
+	}
+	values := decodeList(field(v, "values"), decode)
+	if count != int64(values.Len()) {
+		invalid("矩阵长度不匹配")
+	}
+	return Matrix[T]{d, values}
+}
+
+// encoding/json 会替换孤立代理项；读取前显式拒绝，保持各语言文本一致。
+func checkSurrogates(data []byte) {
+	inside := false
+	for i := 0; i < len(data); i++ {
+		if data[i] == '"' {
+			inside = !inside
+			continue
+		}
+		if !inside || data[i] != '\\' {
+			continue
+		}
+		i++
+		if i >= len(data) {
+			invalid("字符串转义未结束")
+		}
+		if data[i] != 'u' {
+			continue
+		}
+		if i+4 >= len(data) {
+			invalid("Unicode 转义未结束")
+		}
+		n, e := strconv.ParseUint(string(data[i+1:i+5]), 16, 16)
+		if e != nil {
+			panic(e)
+		}
+		i += 4
+		if n >= 0xdc00 && n <= 0xdfff {
+			invalid("孤立 Unicode 低代理项")
+		}
+		if n >= 0xd800 && n <= 0xdbff {
+			if i+6 >= len(data) || data[i+1] != '\\' || data[i+2] != 'u' {
+				invalid("缺少 Unicode 低代理项")
+			}
+			low, e := strconv.ParseUint(string(data[i+3:i+7]), 16, 16)
+			if e != nil || low < 0xdc00 || low > 0xdfff {
+				invalid("Unicode 代理项无效")
+			}
+			i += 6
+		}
+	}
+}
+
+func parseJSON(data []byte) any {return parseJSONLimited(data,72,16*1024*1024)}
+type jsonAllocationBounds struct{rows,elements,members,stringBytes,depth int;rootArray string}
+func jsonBoundsFor(schema wireTable,limits *ResourceLimits)*jsonAllocationBounds{
+    if limits==nil{return nil};b:=&jsonAllocationBounds{limits.MaxRows,limits.MaxContainerElements,len(schema.Fields)+1,limits.MaxStringBytes,limits.MaxDepth*2+8,"rows"};if b.elements<64{b.elements=64};if b.members<4{b.members=4};if b.stringBytes<256{b.stringBytes=256};if b.depth>72{b.depth=72}
+    name:=func(value string){if len(value)>b.stringBytes{b.stringBytes=len(value)}};name(schema.Name);for _,field:=range schema.Fields{name(field.Name)};for _,kind:=range schema.Types{name(kind.ID);if len(kind.Fields)+1>b.members{b.members=len(kind.Fields)+1};for _,field:=range kind.Fields{name(field.Name)}};return b
+}
+func jsonAllocationFailure(){panic(&ConfigError{Code:LimitExceeded,Stage:"parse",Cause:fmt.Errorf("JSON allocation budget exceeded")})}
+// encoding/json allocates token strings. Check their maximum escaped wire size first;
+// exact decoded UTF-8 lengths are checked immediately after each token.
+func guardJSONTokenStorage(data []byte,maximumString int){
+    maximum:=maximumString*6+2
+    for i:=0;i<len(data);i++{if data[i]=='"'{start:=i;i++;for i<len(data)&&data[i]!='"'{if i-start>maximum{jsonAllocationFailure()};if data[i]=='\\'{i++};i++};if i-start>maximum{jsonAllocationFailure()}}else if data[i]=='-'||(data[i]>='0'&&data[i]<='9'){start:=i;for i<len(data)&&data[i]!=','&&data[i]!=']'&&data[i]!='}'&&data[i]!=' '&&data[i]!='\n'&&data[i]!='\r'&&data[i]!='\t'{if i-start>1024{jsonAllocationFailure()};i++};i--}}
+}
+func parseJSONWithBounds(data []byte,bounds *jsonAllocationBounds)any{if bounds==nil{return parseJSON(data)};return parseJSONScoped(data,bounds.depth,bounds.stringBytes,bounds)}
+func parseJSONLimited(data []byte,maximumDepth,maximumString int) any {return parseJSONScoped(data,maximumDepth,maximumString,nil)}
+func parseJSONScoped(data []byte,maximumDepth,maximumString int,bounds *jsonAllocationBounds) any {
+    if bounds!=nil{guardJSONTokenStorage(data,maximumString)}
+	checkSurrogates(data)
+	if !utf8.Valid(data) {
+		panic(&ConfigError{Code:InvalidEncoding})
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.UseNumber()
+	remaining := 32000000
+	var read func(int,bool) any
+	read = func(depth int,rows bool) any {
+		remaining--
+		if depth > maximumDepth || remaining < 0 {
+            if bounds!=nil{jsonAllocationFailure()}
+			panic(serverError(LimitExceeded))
+		}
+		token, e := decoder.Token()
+		if e != nil {
+			panic(e)
+		}
+		switch d := token.(type) {
+		case json.Delim:
+			if d == '{' {
+				m := map[string]any{}
+				for decoder.More() {
+                    if bounds!=nil&&len(m)>=bounds.members{jsonAllocationFailure()}
+					k, e := decoder.Token()
+					if e != nil {
+						panic(e)
+					}
+					name, ok := k.(string)
+					if !ok {
+						invalid("对象键无效")
+					}
+                    if bounds!=nil&&len(name)>maximumString{jsonAllocationFailure()}
+					if _, ok = m[name]; ok {
+						invalid("JSON 重复键")
+					}
+					m[name] = read(depth + 1,depth==0&&name==func()string{if bounds!=nil{return bounds.rootArray};return "rows"}())
+				}
+				end, e := decoder.Token()
+				if e != nil || end != json.Delim('}') {
+					invalid("JSON 对象未结束")
+				}
+				return m
+			}
+			if d == '[' {
+				a := []any{}
+				for decoder.More() {
+                    if bounds!=nil{maximum:=bounds.elements;if rows{maximum=bounds.rows};if len(a)>=maximum{jsonAllocationFailure()}}
+					a = append(a, read(depth+1,false))
+				}
+				end, e := decoder.Token()
+				if e != nil || end != json.Delim(']') {
+					invalid("JSON 数组未结束")
+				}
+				return a
+			}
+			invalid("JSON 分隔符无效")
+		case json.Number:
+			if len(d) > 1024 {
+				invalid("数字文本过长")
+			}
+		case string:
+			if len(d) > maximumString {
+                if bounds!=nil{jsonAllocationFailure()}
+				panic(serverError(LimitExceeded))
+			}
+		}
+		return token
+	}
+	result := read(0,false)
+	if _, e := decoder.Token(); e != io.EOF {
+		invalid("JSON 尾随数据")
+	}
+	return result
+}
+
+type wireField struct {
+	Name string `json:"name"`
+	Type string `json:"type"`
+}
+type wireType struct {
+	ID             string      `json:"id"`
+	Kind           string      `json:"kind"`
+	Primitive      string      `json:"primitive"`
+	NullableObject bool        `json:"nullableObject"`
+	Rank           int         `json:"rank"`
+	Element        string      `json:"element"`
+	Key            string      `json:"key"`
+	Fields         []wireField `json:"fields"`
+	Variants       []string    `json:"variants"`
+	EnumValues     []string    `json:"enumValues"`
+	ReferenceTable string      `json:"referenceTable"`
+}
+type wireTable struct {
+	Name   string      `json:"name"`
+	Hash   string      `json:"hash"`
+	HasID  bool        `json:"hasId"`
+	Fields []wireField `json:"fields"`
+	Keys   []string    `json:"keys"`
+	Types  []wireType  `json:"types"`
+	Tags   []string    `json:"tags"`
+}
+type cursor struct {
+	data []byte
+	pos  int
+	maximumString int
+}
+
+func (r *cursor) take(n int) []byte {
+	if n < 0 || n > len(r.data)-r.pos {
+		invalid("二进制数据截断")
+	}
+	b := r.data[r.pos : r.pos+n]
+	r.pos += n
+	return b
+}
+func (r *cursor) i32() int32 { return int32(binary.LittleEndian.Uint32(r.take(4))) }
+func (r *cursor) count(max int) int {
+	n := int(r.i32())
+	if n < 0 || n > max {
+		invalid("长度超限")
+	}
+	return n
+}
+func (r *cursor) boolean() bool {
+	b := r.take(1)[0]
+	if b > 1 {
+		invalid("bool 编码无效")
+	}
+	return b != 0
+}
+func (r *cursor) text() string {
+	n := r.i32()
+	if n == -1 {
+		return ""
+	}
+	if n < 0 || n > 16*1024*1024 {
+		invalid("字符串长度无效")
+	}
+	if r.maximumString>0&&int(n)>r.maximumString{panic(serverError(LimitExceeded))}
+	b := r.take(int(n))
+	if !utf8.Valid(b) {
+		panic(&ConfigError{Code:InvalidEncoding})
+	}
+	return string(b)
+}
+
+type wireReader struct {
+	schema    wireTable
+	types     map[string]wireType
+	tags      []string
+	remaining int
+	limits *ResourceLimits
+}
+
+func newWire(schema string) *wireReader {
+	w := &wireReader{types: map[string]wireType{}}
+	if e := json.Unmarshal([]byte(schema), &w.schema); e != nil {
+		panic(e)
+	}
+	for _, t := range w.schema.Types {
+		w.types[t.ID] = t
+	}
+	return w
+}
+func(w *wireReader)reset(){w.remaining=8000000;if w.limits!=nil{w.remaining=w.limits.MaxContainerElements}}
+func (w *wireReader) claim(n int64) {
+	if w.limits!=nil&&(n<0||n>int64(w.remaining)){panic(serverError(LimitExceeded))}
+	if n < 0 || n > maxElements || n > int64(w.remaining) {
+		invalid("集合预算超限")
+	}
+	w.remaining -= int(n)
+}
+func(w *wireReader)fieldFailure(name string,index int,role string){if value:=recover();value!=nil{if w.limits==nil{panic(value)};var err *ConfigError;switch v:=value.(type){case *ConfigError:copy:=*v;err=&copy;case dataFault:err=&ConfigError{Code:InvalidValue,Cause:v};default:panic(value)};prefix:=name;if index>=0{prefix="["+strconv.Itoa(index)+"]"+role};if err.Field!=""&&!strings.HasPrefix(err.Field,"["){prefix+="."};err.Field=prefix+err.Field;panic(err)}}
+func(w *wireReader)valueField(id string,r *cursor,depth int,name string,index int,role string)any{defer w.fieldFailure(name,index,role);return w.value(id,r,depth)}
+func(w *wireReader)validateField(id string,value any,depth int,name string,index int,role string){defer w.fieldFailure(name,index,role);w.validate(id,value,depth)}
+func (w *wireReader) fields(fields []wireField, r *cursor, depth int) any {
+	v := make(map[string]any, len(fields))
+	for _, f := range fields {
+		v[f.Name] = w.valueField(f.Type,r,depth+1,f.Name,-1,"")
+	}
+	return v
+}
+func contains(values []string, value string) bool {
+	for _, v := range values {
+		if v == value {
+			return true
+		}
+	}
+	return false
+}
+func primitive(kind string, r *cursor) any {
+	switch kind {
+	case "string":
+		return r.text()
+	case "bool":
+		return r.boolean()
+	case "int8":
+		return json.Number(strconv.FormatInt(int64(int8(r.take(1)[0])), 10))
+	case "uint8":
+		return json.Number(strconv.FormatUint(uint64(r.take(1)[0]), 10))
+	case "int16":
+		return json.Number(strconv.FormatInt(int64(int16(binary.LittleEndian.Uint16(r.take(2)))), 10))
+	case "uint16":
+		return json.Number(strconv.FormatUint(uint64(binary.LittleEndian.Uint16(r.take(2))), 10))
+	case "int32":
+		return json.Number(strconv.FormatInt(int64(r.i32()), 10))
+	case "uint32":
+		return json.Number(strconv.FormatUint(uint64(uint32(r.i32())), 10))
+	case "int64":
+		return strconv.FormatInt(int64(binary.LittleEndian.Uint64(r.take(8))), 10)
+	case "uint64":
+		return strconv.FormatUint(binary.LittleEndian.Uint64(r.take(8)), 10)
+	case "float32":
+		f := float64(math.Float32frombits(uint32(r.i32())))
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			invalid("浮点数无效")
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 32))
+	case "float64":
+		f := math.Float64frombits(binary.LittleEndian.Uint64(r.take(8)))
+		if math.IsNaN(f) || math.IsInf(f, 0) {
+			invalid("浮点数无效")
+		}
+		return json.Number(strconv.FormatFloat(f, 'g', -1, 64))
+	case "decimal":
+		d := Decimal{uint32(r.i32()), uint32(r.i32()), uint32(r.i32()), uint32(r.i32())}
+		if d.flags&0x7f00ffff != 0 || (d.flags>>16)&255 > 28 {
+			invalid("decimal 编码无效")
+		}
+		return d.String()
+	}
+	invalid("未知标量：" + kind)
+	return nil
+}
+func (w *wireReader) value(id string, r *cursor, depth int) any {
+	if w.limits!=nil&&depth>w.limits.MaxDepth{panic(serverError(LimitExceeded))}
+	if depth > 64 {
+		invalid("嵌套过深")
+	}
+	t, ok := w.types[id]
+	if !ok {
+		invalid("未知类型")
+	}
+	switch t.Kind {
+	case "primitive", "tablereference", "enum":
+		v := primitive(t.Primitive, r)
+		if t.Kind == "enum" {
+			s := ""
+			if n, ok := v.(json.Number); ok {
+				s = string(n)
+			} else {
+				s = text(v)
+			}
+			if !contains(t.EnumValues, s) {
+				invalid("未知枚举值")
+			}
+		}
+		return v
+	case "rawjson":
+		return r.text()
+	case "nullable":
+		if !r.boolean() {
+			return nil
+		}
+		return w.value(t.Element, r, depth+1)
+	case "array":
+		dims := make([]any, t.Rank)
+		count := int64(1)
+		for i := range dims {
+			n := r.count(maxElements)
+			dims[i] = json.Number(strconv.Itoa(n))
+			if count > maxElements && n != 0 {
+				invalid("矩阵过大")
+			}
+			count *= int64(n)
+		}
+		w.claim(count)
+		values := make([]any, int(count))
+		for i := range values {
+			values[i] = w.valueField(t.Element,r,depth+1,"",i,"")
+		}
+		if t.Rank == 1 {
+			return values
+		}
+		return map[string]any{"dimensions": dims, "values": values}
+	case "dictionary":
+		n := r.count(maxElements)
+		w.claim(int64(n))
+		values := make([]any, n)
+		for i := range values {
+			values[i] = []any{w.valueField(t.Key,r,depth+1,"",i,".key"),w.valueField(t.Element,r,depth+1,"",i,".value")}
+		}
+		return values
+	}
+	if t.Kind == "object" && len(t.Variants) > 0 {
+		tag := r.i32()
+		if tag == -1 {
+			return nil
+		}
+		if tag < 0 || int(tag) >= len(w.tags) || !contains(t.Variants, w.tags[tag]) {
+			invalid("多态类型不匹配")
+		}
+		actual := w.tags[tag]
+		v := object(w.fields(w.types[actual].Fields, r, depth))
+		v["$type"] = actual
+		return v
+	}
+	if t.NullableObject && !r.boolean() {
+		return nil
+	}
+	return w.fields(t.Fields, r, depth)
+}
+func (w *wireReader) validateFields(fields []wireField, v any, depth int, tagged bool) {
+	n := len(fields)
+	if tagged {
+		n++
+	}
+	if len(object(v)) != n {
+		invalid("对象成员不匹配")
+	}
+	for _, f := range fields {
+		w.validateField(f.Type,field(v,f.Name),depth+1,f.Name,-1,"")
+	}
+}
+func (w *wireReader) validate(id string, v any, depth int) {
+	if w.limits!=nil&&depth>w.limits.MaxDepth{panic(serverError(LimitExceeded))}
+	if depth > 64 {
+		invalid("嵌套过深")
+	}
+	t := w.types[id]
+	switch t.Kind {
+	case "primitive", "tablereference", "enum":
+		switch t.Primitive {
+		case "string":
+			value:=text(v);if w.limits!=nil&&len(value)>w.limits.MaxStringBytes{panic(serverError(LimitExceeded))}
+		case "bool":
+			boolean(v)
+		case "int8":
+			signed(v, 8)
+		case "uint8":
+			unsigned(v, 8)
+		case "int16":
+			signed(v, 16)
+		case "uint16":
+			unsigned(v, 16)
+		case "int32":
+			signed(v, 32)
+		case "uint32":
+			unsigned(v, 32)
+		case "int64":
+			signed(v, 64)
+		case "uint64":
+			unsigned(v, 64)
+		case "float32":
+			floating(v, 32)
+		case "float64":
+			floating(v, 64)
+		case "decimal":
+			decimalValue(text(v))
+		default:
+			invalid("未知标量")
+		}
+		if t.Kind == "enum" {
+			s := ""
+			if n, ok := v.(json.Number); ok {
+				s = string(n)
+			} else {
+				s = text(v)
+			}
+			if !contains(t.EnumValues, s) {
+				invalid("未知枚举值")
+			}
+		}
+		return
+	case "rawjson":
+		value:=text(v);if w.limits!=nil&&len(value)>w.limits.MaxStringBytes{panic(serverError(LimitExceeded))};parseJSON([]byte(value))
+		return
+	case "nullable":
+		if v != nil {
+			w.validate(t.Element, v, depth+1)
+		}
+		return
+	case "array":
+		values := v
+		if t.Rank > 1 {
+			values = field(v, "values")
+			dims := array(field(v, "dimensions"))
+			if len(dims) != t.Rank || len(object(v)) != 2 {
+				invalid("矩阵维度无效")
+			}
+			n := int64(1)
+			for _, d := range dims {
+				x := signed(d, 32)
+				if x < 0 || x > maxElements || n > maxElements && x != 0 {
+					invalid("矩阵过大")
+				}
+				n *= x
+			}
+			if n != int64(len(array(values))) {
+				invalid("矩阵长度不匹配")
+			}
+		}
+		a := array(values)
+		w.claim(int64(len(a)))
+		for i, x := range a {
+			w.validateField(t.Element,x,depth+1,"",i,"")
+		}
+		return
+	case "dictionary":
+		a := array(v)
+		w.claim(int64(len(a)))
+		for i, x := range a {
+			pair := array(x)
+			if len(pair) != 2 {
+				invalid("字典条目无效")
+			}
+			w.validateField(t.Key,pair[0],depth+1,"",i,".key")
+			w.validateField(t.Element,pair[1],depth+1,"",i,".value")
+		}
+		return
+	}
+	if v == nil && t.NullableObject {
+		return
+	}
+	if len(t.Variants) > 0 {
+		tag := text(field(v, "$type"))
+		if !contains(t.Variants, tag) {
+			invalid("多态标记无效")
+		}
+		w.validateFields(w.types[tag].Fields, v, depth, true)
+	} else {
+		w.validateFields(t.Fields, v, depth, false)
+	}
+}
+func (w *wireReader) read(data []byte, isJSON bool) []any {
+	if isJSON {
+		doc := parseJSON(data)
+		if len(object(doc)) != 4 || text(field(doc, "format")) != "ZrConfig.TableJson/1" || text(field(doc, "table")) != w.schema.Name || text(field(doc, "schemaHash")) != w.schema.Hash {
+			invalid("JSON 表头不匹配")
+		}
+		rows := array(field(doc, "rows"))
+		if len(rows) > maxRows {
+			invalid("行数过大")
+		}
+		for _, row := range rows {
+			w.reset()
+			w.validateFields(w.schema.Fields, row, 0, false)
+		}
+		return rows
+	}
+	r := &cursor{data: data}
+	if r.i32() != 0x4643525a || r.i32() != 4 || r.text() != w.schema.Name || r.text() != w.schema.Hash {
+		invalid("二进制表头不匹配")
+	}
+	count := r.count(maxRows)
+	if int64(count)*12 > int64(len(data)-r.pos) {
+		invalid("行索引长度不足")
+	}
+	allowed := map[string]bool{}
+	for _, tag := range w.schema.Tags {
+		allowed[tag] = true
+	}
+	n := r.count(len(allowed))
+	w.tags = make([]string, n)
+	seen := map[string]bool{}
+	for i := range w.tags {
+		tag := r.text()
+		if !allowed[tag] || seen[tag] {
+			invalid("类型目录无效")
+		}
+		seen[tag] = true
+		w.tags[i] = tag
+	}
+	offsets := make([]int32, count)
+	lengths := make([]int32, count)
+	ids := make([]int32, count)
+	keys := make([][]any, count)
+	for i := 0; i < count; i++ {
+		w.reset()
+		keys[i] = make([]any, len(w.schema.Keys))
+		for k, name := range w.schema.Keys {
+			for _, f := range w.schema.Fields {
+				if f.Name == name {
+					keys[i][k] = w.value(f.Type, r, 0)
+				}
+			}
+		}
+		ids[i] = r.i32()
+		offsets[i] = r.i32()
+		lengths[i] = r.i32()
+		if offsets[i] < 0 || lengths[i] < 0 || i == 0 && offsets[i] != 0 || i > 0 && int64(offsets[i-1])+int64(lengths[i-1]) != int64(offsets[i]) {
+			invalid("行索引不连续")
+		}
+	}
+	start := r.pos
+	end := int64(start)
+	if count > 0 {
+		end += int64(offsets[count-1]) + int64(lengths[count-1])
+	}
+	if end != int64(len(data)) {
+		invalid("文件长度不匹配")
+	}
+	rows := make([]any, count)
+	for i := range rows {
+		w.reset()
+		row := w.fields(w.schema.Fields, r, 0)
+		if int64(r.pos) != int64(start)+int64(offsets[i])+int64(lengths[i]) {
+			invalid("行边界无效")
+		}
+		for k, name := range w.schema.Keys {
+			if keys[i][k] != field(row, name) {
+				invalid("主键与索引不匹配")
+			}
+		}
+		id := int32(0)
+		if w.schema.HasID {
+			id = int32(signed(field(row, "Id"), 32))
+		}
+		if id != ids[i] {
+			invalid("Id 与索引不匹配")
+		}
+		rows[i] = row
+	}
+	return rows
+}
+
+type bundle struct {
+    target string
+	source ConfigSource
+	ctx context.Context
+	budget *loadBudget
+	digest string
+	version string
+	folder  string
+	entries map[string]any
+}
+
+func pathSegment(s string) string {
+	if s == "" || strings.HasPrefix(s, ".") || strings.ContainsAny(s, "/\\:") {
+		invalid("清单路径无效")
+	}
+	return s
+}
+func readFile(path string) []byte {
+	b, e := os.ReadFile(path)
+	if e != nil {
+		panic(e)
+	}
+	return b
+}
+func openBundle(root string) *bundle {
+	return parseBundle(readFile(filepath.Join(root, "current.json")),root,nil)
+}
+func sourceFailure(err error)error{var own *ConfigError;if errors.As(err,&own){copy:=*own;if err!=own{copy.Cause=err};return &copy};if errors.Is(err,context.Canceled){return &ConfigError{Code:Cancelled,Cause:err}};if errors.Is(err,context.DeadlineExceeded){return &ConfigError{Code:DeadlineExceeded,Cause:err}};return &ConfigError{Code:ReadFailed,Stage:"read",Cause:err}}
+func openServerBundle(ctx context.Context,source ConfigSource,limits ResourceLimits)*bundle{
+    data,err:=source.Read(ctx,"current.json",limits.MaxManifestBytes);if err!=nil{panic(locateError(sourceFailure(err),"read","","","","","current.json"))};if err=checkContext(ctx);err!=nil{panic(err)};if int64(len(data))>limits.MaxManifestBytes{panic(serverError(LimitExceeded))};owned:=append([]byte(nil),data...);budget:=&loadBudget{limits:limits};if err=budget.chargeRead(len(owned));err!=nil{panic(err)}
+    b:=parseBundle(owned,"",budget);b.source=source;b.ctx=ctx;hash:=sha256.Sum256(owned);b.digest=hex.EncodeToString(hash[:]);return b
+}
+func parseBundle(data []byte,root string,budget *loadBudget)(result *bundle){
+    defer func(){if fault:=recover();fault!=nil{switch e:=fault.(type){case dataFault:if budget!=nil{panic(&ConfigError{Code:InvalidManifest,Stage:"manifest",Cause:e})};case *json.SyntaxError:if budget!=nil{panic(&ConfigError{Code:InvalidManifest,Stage:"manifest",Cause:e})};case error:if budget!=nil&&(e==io.EOF||e==io.ErrUnexpectedEOF){panic(&ConfigError{Code:InvalidManifest,Stage:"manifest",Cause:e})}};panic(fault)}}()
+    var doc any;if budget==nil{doc=parseJSON(data)}else{doc=parseJSONWithBounds(data,&jsonAllocationBounds{budget.limits.MaxTables,64,32,4096,8,"tables"})}
+	format := text(field(doc, "format"))
+	if format != "ZrConfig.Binary/1" && format != "ZrConfig.Json/1" && format != "ZrConfig.Mixed/1" {
+		if budget!=nil{panic(serverError(UnsupportedFormat))};invalid("清单格式不支持")
+	}
+	version := pathSegment(text(field(doc, "versionId")))
+	b := &bundle{version:version,folder:filepath.Join(root, "versions", version),entries:map[string]any{},budget:budget}
+    if target,ok:=object(doc)["target"].(string);ok{b.target=target}
+	if budget!=nil&&len(array(field(doc,"tables")))>budget.limits.MaxTables{panic(serverError(LimitExceeded))}
+	for _, entry := range array(field(doc, "tables")) {
+		name := pathSegment(text(field(entry, "name")))
+		suffix := ".bytes"
+		if format == "ZrConfig.Json/1" {
+			suffix = ".json"
+		}
+		count := signed(field(entry, "rows"), 32)
+		if text(field(entry, "file")) != name+suffix || count < 0 || count > maxRows {
+			invalid("清单文件名或行数错误")
+		}
+		schemaHash,schemaError:=hex.DecodeString(text(field(entry,"schemaHash")));if schemaError!=nil||len(schemaHash)!=32{invalid("清单结构摘要无效")}
+		hash, e := hex.DecodeString(text(field(entry, "sha256")))
+		if e != nil || len(hash) != 32 {
+			invalid("清单哈希无效")
+		}
+		if format == "ZrConfig.Mixed/1" {
+			hash, e = hex.DecodeString(text(field(entry, "jsonSha256")))
+			if text(field(entry, "jsonFile")) != name+".json" || e != nil || len(hash) != 32 {
+				invalid("JSON 清单无效")
+			}
+		} else if object(entry)["jsonFile"] != nil || object(entry)["jsonSha256"] != nil {
+			invalid("格式与 JSON 清单不一致")
+		}
+
+		if _, ok := b.entries[name]; ok {
+			invalid("清单表重复")
+		}
+		b.entries[name] = entry
+	}
+	return b
+}
+func (b *bundle) validateTables(expected []string) {
+	if len(b.entries) != len(expected) { invalid("清单表集合不匹配") }
+	for _, name := range expected {
+		if _, ok := b.entries[name]; !ok { invalid("清单表集合不匹配") }
+	}
+}
+func(b *bundle)validateCatalog(catalog *Catalog)error{
+    if catalog.target!=""&&catalog.target!=b.target{return &ConfigError{Code:CatalogMismatch,Stage:"manifest"}}
+	if len(b.entries)!=catalog.tables.Len(){return serverError(TableSetMismatch)}
+	for _,table:=range catalog.tables.values{entry,ok:=b.entries[table.name];if !ok{return serverError(TableSetMismatch)};if text(field(entry,"schemaHash"))!=table.schemaHash{return serverError(SchemaMismatch)}}
+	return nil
+}
+func (b *bundle) load(schema string, preferJSON bool) []any {
+	w := newWire(schema)
+	entry, ok := b.entries[w.schema.Name]
+	if !ok {
+		invalid("清单缺少表：" + w.schema.Name)
+	}
+	if text(field(entry, "schemaHash")) != w.schema.Hash {
+		invalid("表结构不匹配")
+	}
+	fileName, hashName := "file", "sha256"
+	if preferJSON {
+		if v, ok := object(entry)["jsonFile"].(string); ok && v != "" {
+			fileName, hashName = "jsonFile", "jsonSha256"
+		}
+	}
+	file := pathSegment(text(field(entry, fileName)))
+	data := readFile(filepath.Join(b.folder, file))
+	hash := sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(hash[:]), text(field(entry, hashName))) {
+		invalid("文件哈希不匹配")
+	}
+	rows := w.read(data, strings.HasSuffix(file, ".json"))
+	if int64(len(rows)) != signed(field(entry, "rows"), 32) {
+		invalid("清单行数不匹配")
+	}
+	return rows
+}
+
+func loadPlanFingerprint(mode LoadMode,json bool,tables []string)string{names:=make([]string,len(tables));for i,name:=range tables{names[i]=hex.EncodeToString([]byte(name))};sort.Strings(names);format:="binary";if json{format="json-preferred"};value:="zrconfig-load-plan/1\n"+string(mode)+"\n"+format+"\n"+strings.Join(names,"\n");sum:=sha256.Sum256([]byte(value));return hex.EncodeToString(sum[:])}
+type LoadMode string
+const ( ServerDefault LoadMode="ServerDefault"; SelectedTables LoadMode="SelectedTables"; LazyRowsStrict LoadMode="LazyRowsStrict"; LazyRowsOnAccess LoadMode="LazyRowsOnAccess" )
+type LoadPlan struct { Mode LoadMode; Tables []string; PreferJSON bool; WarmupTables []string; Limits ResourceLimits; SourceNamespace string }
+type indexedRows struct {
+    indexRawBytes int64
+    jsonBounds *jsonAllocationBounds
+    version,relativePath string
+	wire *wireReader
+	budget *loadBudget
+	data []byte
+	fragments [][]byte
+	offsets,lengths []int
+	ids []int32
+	keys []map[string]any
+	references map[int32]int
+	resolve map[string]*indexedRows
+	gate sync.Mutex
+}
+func(b *bundle)openRows(schema string,preferJSON bool)*indexedRows{
+	w:=newWire(schema);entry,ok:=b.entries[w.schema.Name];if !ok||text(field(entry,"schemaHash"))!=w.schema.Hash{panic(serverError(SchemaMismatch))}
+	fileName,hashName:="file","sha256";if preferJSON{if v,ok:=object(entry)["jsonFile"].(string);ok&&v!=""{fileName,hashName="jsonFile","jsonSha256"}}
+	file:=pathSegment(text(field(entry,fileName)));var data []byte
+    if b.source==nil{data=readFile(filepath.Join(b.folder,file))}else{if err:=b.budget.chargeRows(int(signed(field(entry,"rows"),32)));err!=nil{panic(err)};limit:=b.budget.limits.MaxTableBytes;b.budget.gate.Lock();remaining:=b.budget.limits.MaxBundleBytes-b.budget.readBytes;b.budget.gate.Unlock();if remaining<limit{limit=remaining};if limit<=0{panic(serverError(LimitExceeded))};var err error;data,err=b.source.Read(b.ctx,"versions/"+b.version+"/"+file,limit);if err!=nil{panic(locateError(sourceFailure(err),"read",b.version,w.schema.Name,"","","versions/"+b.version+"/"+file))};if err=checkContext(b.ctx);err!=nil{panic(err)};if int64(len(data))>limit{panic(serverError(LimitExceeded))};if err=b.budget.chargeRead(len(data));err!=nil{panic(err)};data=append([]byte(nil),data...);w.limits=&b.budget.limits};digest:=sha256.Sum256(data)
+	if !strings.EqualFold(hex.EncodeToString(digest[:]),text(field(entry,hashName))){panic(serverError(IntegrityMismatch))}
+	result:=newIndexedRows(w,data,strings.HasSuffix(file,".json"));result.budget=b.budget;result.version=b.version;result.relativePath="versions/"+b.version+"/"+file;if b.budget!=nil{raw:=int64(len(result.data));for _,fragment:=range result.fragments{raw+=int64(len(fragment))};b.budget.gate.Lock();result.indexRawBytes=raw;b.budget.rawBytes+=raw;b.budget.gate.Unlock()};if int64(len(result.ids))!=signed(field(entry,"rows"),32){panic(serverError(InvalidValue))};return result
+}
+func newIndexedRows(w *wireReader,data []byte,isJSON bool)*indexedRows{
+	result:=&indexedRows{wire:w,references:map[int32]int{},jsonBounds:jsonBoundsFor(w.schema,w.limits)}
+	if isJSON{
+		doc:=parseJSONWithBounds(data,result.jsonBounds);if len(object(doc))!=4||text(field(doc,"format"))!="ZrConfig.TableJson/1"||text(field(doc,"table"))!=w.schema.Name||text(field(doc,"schemaHash"))!=w.schema.Hash{panic(serverError(SchemaMismatch))}
+		rows:=array(field(doc,"rows"));if len(rows)>maxRows||(w.limits!=nil&&len(rows)>w.limits.MaxRows){panic(serverError(LimitExceeded))};result.fragments=make([][]byte,len(rows));result.ids=make([]int32,len(rows));result.keys=make([]map[string]any,len(rows))
+		for i,row:=range rows{w.reset();key:=map[string]any{};for _,name:=range w.schema.Keys{for _,f:=range w.schema.Fields{if f.Name==name{value:=field(row,name);w.validate(f.Type,value,0);key[name]=value}}};result.keys[i]=key;if w.schema.HasID{result.ids[i]=int32(signed(field(row,"Id"),32))};fragment,err:=json.Marshal(row);if err!=nil{panic(err)};result.fragments[i]=fragment}
+	}else{
+		result.data=data;r:=&cursor{data:data};if w.limits!=nil{r.maximumString=w.limits.MaxStringBytes};if r.i32()!=0x4643525a||r.i32()!=4||r.text()!=w.schema.Name||r.text()!=w.schema.Hash{panic(serverError(SchemaMismatch))}
+		count:=r.count(maxRows);if w.limits!=nil&&count>w.limits.MaxRows{panic(serverError(LimitExceeded))};if int64(count)*12>int64(len(data)-r.pos){panic(serverError(InvalidValue))};allowed:=map[string]bool{};for _,tag:=range w.schema.Tags{allowed[tag]=true};n:=r.count(len(allowed));w.tags=make([]string,n);seen:=map[string]bool{}
+		for i:=range w.tags{tag:=r.text();if !allowed[tag]||seen[tag]{panic(serverError(InvalidValue))};seen[tag]=true;w.tags[i]=tag}
+		result.offsets=make([]int,count);result.lengths=make([]int,count);result.ids=make([]int32,count);result.keys=make([]map[string]any,count);end:=int64(0)
+		for i:=0;i<count;i++{w.reset();key:=map[string]any{};for _,name:=range w.schema.Keys{for _,f:=range w.schema.Fields{if f.Name==name{key[name]=w.value(f.Type,r,0)}}};result.keys[i]=key;result.ids[i]=r.i32();offset,length:=int(r.i32()),int(r.i32());if int64(offset)!=end||length<0{panic(serverError(InvalidValue))};result.offsets[i]=offset;result.lengths[i]=length;end+=int64(length)}
+		if int64(r.pos)+end!=int64(len(data)){panic(serverError(InvalidValue))};for i:=range result.offsets{result.offsets[i]+=r.pos}
+	}
+	if w.schema.HasID{for i,id:=range result.ids{if _,ok:=result.references[id];ok{result.references[id]=-1}else{result.references[id]=i}}};return result
+}
+func(r *indexedRows)read(index int)any{
+    defer func(){if value:=recover();value!=nil{var err error;switch typed:=value.(type){case *ConfigError:err=typed;case dataFault:err=&ConfigError{Code:InvalidValue,Cause:typed};default:panic(value)};key,_:=json.Marshal(r.keys[index]);panic(locateError(err,"row",r.version,r.wire.schema.Name,string(key),"",r.relativePath))}}()
+
+	local:=*r.wire;w:=&local;w.reset();var row any
+	if r.fragments!=nil{row=parseJSONWithBounds(r.fragments[index],r.jsonBounds)}else{cursor:=&cursor{data:r.data[r.offsets[index]:r.offsets[index]+r.lengths[index]]};if w.limits!=nil{cursor.maximumString=w.limits.MaxStringBytes};row=w.fields(w.schema.Fields,cursor,0);if cursor.pos!=len(cursor.data){panic(serverError(InvalidValue))}}
+	w.reset();w.validateFields(w.schema.Fields,row,0,false);for name,value:=range r.keys[index]{if field(row,name)!=value{panic(serverError(InvalidValue))}};id:=int32(0);if w.schema.HasID{id=int32(signed(field(row,"Id"),32))};if id!=r.ids[index]{panic(serverError(InvalidValue))};if r.resolve!=nil{if err:=r.validateReferences(row,r.resolve);err!=nil{panic(err)}};return row
+}
+func(r *indexedRows)reference(id int32)(int,error){ordinal,ok:=r.references[id];if !ok||ordinal<0{return 0,serverError(MissingReference)};return ordinal,nil}
+func(r *indexedRows)validateReferences(row any,all map[string]*indexedRows)error{
+	for _,fieldInfo:=range r.wire.schema.Fields{t:=r.wire.types[fieldInfo.Type];if t.Kind=="tablereference"{id:=int32(signed(field(row,fieldInfo.Name),32));if id!=0{if _,err:=all[t.ReferenceTable].reference(id);err!=nil{return locateError(err,"reference",r.version,r.wire.schema.Name,"",fieldInfo.Name,r.relativePath)}}}};return nil
+}
+type rowWork[T any] struct{done chan struct{};value *T;err error;panicValue any}
+type rowStorage[T any] struct{
+	indexed *indexedRows
+	decode func(any)*T
+	ready []atomic.Pointer[T]
+	work []*rowWork[T]
+	errors []error
+	gate sync.Mutex
+	loaded atomic.Int64
+	all atomic.Pointer[List[*T]]
+}
+func newRowStorage[T any](indexed *indexedRows,decode func(any)*T)*rowStorage[T]{count:=len(indexed.ids);return &rowStorage[T]{indexed:indexed,decode:decode,ready:make([]atomic.Pointer[T],count),work:make([]*rowWork[T],count),errors:make([]error,count)}}
+func(s *rowStorage[T])query(index int)(*T,error){if row:=s.ready[index].Load();row!=nil{return row,nil};s.gate.Lock();err:=s.errors[index];s.gate.Unlock();if err!=nil{return nil,copyFailure(err)};return nil,serverError(RowNotLoaded)}
+func(s *rowStorage[T])complete(index int,work *rowWork[T]){
+    budget:=s.indexed.budget;estimate:=int64(256);if s.indexed.fragments!=nil{estimate+=int64(len(s.indexed.fragments[index]))*4}else{estimate+=int64(s.indexed.lengths[index])*4};reserved:=false
+    defer func(){value:=recover();if value!=nil{work.panicValue=value};terminal:=terminalRowError(work.err);if budget!=nil{if reserved{budget.finish(estimate,work.err==nil&&value==nil,terminal)};budget.release(true)};s.gate.Lock();if terminal{s.errors[index]=work.err};s.work[index]=nil;close(work.done);s.gate.Unlock();if value!=nil{panic(value)}}()
+    if budget!=nil{if work.err=budget.reserve(estimate);work.err!=nil{return};reserved=true}
+    func(){defer recoverServer(&work.err);work.value=s.decode(s.indexed.read(index))}()
+    if work.err==nil{s.ready[index].Store(work.value);s.loaded.Add(1)}
+}
+func(s *rowStorage[T])load(ctx context.Context,index int)(*T,error){
+    if err:=checkContext(ctx);err!=nil{return nil,err};if row:=s.ready[index].Load();row!=nil{return row,nil}
+    s.gate.Lock();if row:=s.ready[index].Load();row!=nil{s.gate.Unlock();return row,nil};if err:=s.errors[index];err!=nil{s.gate.Unlock();return nil,copyFailure(err)};work:=s.work[index];owned:=work==nil;budget:=s.indexed.budget
+    if budget!=nil{if err:=budget.admit(owned);err!=nil{s.gate.Unlock();return nil,err}}
+    if owned{work=&rowWork[T]{done:make(chan struct{})};s.work[index]=work};s.gate.Unlock()
+    if owned{s.complete(index,work)}else if budget!=nil{defer budget.release(false)}
+    select{case <-ctx.Done():return nil,checkContext(ctx);case <-work.done:if err:=checkContext(ctx);err!=nil{return nil,err};if work.panicValue!=nil{panic(work.panicValue)};return work.value,copyFailure(work.err)}
+}
+func(s *rowStorage[T])reference(ctx context.Context,id int32,load bool)(*T,error){if id==0{return nil,nil};index,err:=s.indexed.reference(id);if err!=nil{return nil,err};if load{return s.load(ctx,index)};return s.query(index)}
+func(s *rowStorage[T])loadAll(ctx context.Context)(List[*T],error){
+	if err:=checkContext(ctx);err!=nil{return List[*T]{},err};if all:=s.all.Load();all!=nil{return *all,nil};rows:=List[*T]{values:make([]*T,len(s.ready))}
+	for i:=range rows.values{row,err:=s.load(ctx,i);if err!=nil{return List[*T]{},err};rows.values[i]=row};if err:=checkContext(ctx);err!=nil{return List[*T]{},err};s.all.CompareAndSwap(nil,&rows);return *s.all.Load(),nil
+}
+
+// oneValue merges cold derived-index work; its atomic ready path allocates nothing.
+// A caller's context affects only that caller. Decode runs outside the state mutex.
+type oneValue[T any] struct { ready atomic.Pointer[T]; gate sync.Mutex; work *rowWork[T]; failure error }
+func(s *oneValue[T])get()(T,error){if value:=s.ready.Load();value!=nil{return *value,nil};s.gate.Lock();err:=s.failure;s.gate.Unlock();var zero T;if err!=nil{return zero,copyFailure(err)};return zero,serverError(TableNotLoaded)}
+func(r *indexedRows)readTransient(index int)any{estimate:=int64(256);if r.fragments!=nil{estimate+=int64(len(r.fragments[index]))*4}else{estimate+=int64(r.lengths[index])*4};if r.budget!=nil{if err:=r.budget.reserveTransient(estimate);err!=nil{panic(err)};defer r.budget.finishTransient(estimate)};return r.read(index)}
+func(r *indexedRows)estimatedIndexBytes(fields int)int64{if fields<1{fields=1};return 256+int64(len(r.ids))*512*int64(fields)+r.indexRawBytes*8}
+func(s *oneValue[T])load(ctx context.Context,budget *loadBudget,estimate int64,build func()(T,int64,error))(T,error){
+    var zero T;if err:=checkContext(ctx);err!=nil{return zero,err};if value:=s.ready.Load();value!=nil{return *value,nil}
+    s.gate.Lock();if value:=s.ready.Load();value!=nil{s.gate.Unlock();return *value,nil};if err:=s.failure;err!=nil{s.gate.Unlock();return zero,copyFailure(err)};work:=s.work;owner:=work==nil
+    if err:=budget.admit(owner);err!=nil{s.gate.Unlock();return zero,err};if owner{work=&rowWork[T]{done:make(chan struct{})};s.work=work};s.gate.Unlock();defer budget.release(owner)
+    if owner{func(){defer func(){fatal:=recover();work.panicValue=fatal;s.gate.Lock();if terminalRowError(work.err){s.failure=work.err;budget.gate.Lock();budget.indexFaults++;budget.gate.Unlock()};s.work=nil;close(work.done);s.gate.Unlock();if fatal!=nil{panic(fatal)}}();func(){defer recoverServer(&work.err);if work.err=budget.reserveIndex(estimate);work.err!=nil{return};committed:=false;defer func(){if !committed{budget.releaseIndex(estimate)}}();value,retained,err:=build();work.err=err;if err==nil{if retained>estimate{if work.err=budget.reserveIndex(retained-estimate);work.err!=nil{return}}else{budget.releaseIndex(estimate-retained)};estimate=retained;work.value=&value;s.ready.Store(&value);committed=true}}()}()}
+    select{case <-ctx.Done():return zero,checkContext(ctx);case <-work.done:if err:=checkContext(ctx);err!=nil{return zero,err};if work.panicValue!=nil{panic(work.panicValue)};if work.err!=nil{return zero,copyFailure(work.err)};return *work.value,nil}
+}

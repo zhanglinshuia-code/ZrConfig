@@ -1,0 +1,22 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <Version>1.4.0</Version>
+    </PropertyGroup>
+    <ItemGroup>
+        <InternalsVisibleTo Include="ZrConfig.Tests" />
+        <InternalsVisibleTo Include="ZrConfig.Server.Tests" />
+        <ProjectReference Include="../ZrConfig.Runtime/ZrConfig.Runtime.csproj" />
+        <ProjectReference Include="../ZrConfig.Validation/ZrConfig.Validation.csproj" />
+        <PackageReference Include="ClosedXML" Version="0.105.1" />
+        <PackageReference Include="ExcelDataReader" Version="3.9.0" />
+        <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.9.0" />
+        <PackageReference Include="Serilog" Version="4.4.0" />
+        <PackageReference Include="Serilog.Sinks.File" Version="7.0.0" />
+        <PackageReference Include="Serilog.Sinks.Async" Version="2.1.0" />
+    </ItemGroup>
+    <ItemGroup>
+        <EmbeddedResource Include="../../unity/ZrConfig.Sample/Assets/ZrConfig/Native/*.txt" WithCulture="false" LogicalName="ZrConfig.Native.%(Filename)%(Extension)" />
+        <EmbeddedResource Include="Templates/*.cs.txt" WithCulture="false" LogicalName="ZrConfig.Core.Templates.%(Filename)%(Extension)" />
+    </ItemGroup>
+</Project>

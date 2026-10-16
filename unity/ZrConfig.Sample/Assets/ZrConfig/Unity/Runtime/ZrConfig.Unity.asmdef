@@ -1,0 +1,7 @@
+{
+    "name": "ZrConfig.Unity",
+    "references": [
+        "ZrConfig.Runtime"
+    ],
+    "autoReferenced": true
+}

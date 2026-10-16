@@ -1,0 +1,9 @@
+{
+    "AllTypes": {
+        "groups": {
+            "ByQuality": [
+                "QualityValue"
+            ]
+        }
+    }
+}

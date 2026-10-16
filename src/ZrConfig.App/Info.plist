@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+    <dict>
+        <key>CFBundleName</key>
+        <string>ZrConfig</string>
+        <key>CFBundleDisplayName</key>
+        <string>ZrConfig</string>
+        <key>CFBundleIdentifier</key>
+        <string>com.zrconfig.desktop</string>
+        <key>CFBundleExecutable</key>
+        <string>ZrConfig.App</string>
+        <key>CFBundlePackageType</key>
+        <string>APPL</string>
+        <key>CFBundleInfoDictionaryVersion</key>
+        <string>6.0</string>
+        <key>CFBundleVersion</key>
+        <string>1.4.0</string>
+        <key>CFBundleShortVersionString</key>
+        <string>1.4.0</string>
+        <key>CFBundleDevelopmentRegion</key>
+        <string>zh_CN</string>
+        <key>CFBundleLocalizations</key>
+        <array>
+            <string>zh_CN</string>
+            <string>en</string>
+        </array>
+        <key>NSHighResolutionCapable</key>
+        <true />
+        <key>LSApplicationCategoryType</key>
+        <string>public.app-category.developer-tools</string>
+    </dict>
+</plist>

@@ -1,0 +1,12 @@
+<Solution>
+    <Folder Name="/scripts/">
+        <Project Path="scripts/ZrConfig.Maintenance.csproj" />
+    </Folder>
+    <Folder Name="/src/">
+        <Project Path="src/ZrConfig.Runtime/ZrConfig.Runtime.csproj" />
+        <Project Path="src/ZrConfig.Validation/ZrConfig.Validation.csproj" />
+        <Project Path="src/ZrConfig.Core/ZrConfig.Core.csproj" />
+        <Project Path="src/ZrConfig.Cli/ZrConfig.Cli.csproj" />
+        <Project Path="src/ZrConfig.App/ZrConfig.App.csproj" />
+    </Folder>
+</Solution>

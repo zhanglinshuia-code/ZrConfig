@@ -1,0 +1,10 @@
+{
+    "DataFolder": "Data",
+    "OutputFolder": "Output",
+    "CodeFolder": "../unity/ZrConfig.Sample/Assets/HotUpdate/Config",
+    "RulesFolder": "../unity/ZrConfig.Sample/Assets/Editor/ConfigRules",
+    "Target": "C",
+    "CodeLanguages": ["csharp", "java", "go", "cpp", "lua", "typescript", "rust"],
+    "DataFormat": "both",
+    "RuntimeFamily": "server-v1"
+}

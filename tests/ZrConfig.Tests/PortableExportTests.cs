@@ -1,0 +1,548 @@
+using System.Collections;
+using System.Diagnostics;
+using System.Globalization;
+using System.Linq.Expressions;
+using System.Reflection;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using ClosedXML.Excel;
+using ZrConfig.Core;
+using ZrConfig.Runtime;
+using ZrConfig.Validation;
+
+// 验收实际生成的源码和正式数据，不使用手工替代的客户端模型。
+internal static class PortableExportTests
+{
+    internal static async Task RunAsync(string parent, bool requireNative = false)
+    {
+        string root = Path.Combine(parent, "portable");
+        string data = Path.Combine(root, "Data"), code = Path.Combine(root, "Config"), output = Path.Combine(root, "Output");
+        Directory.CreateDirectory(data); Directory.CreateDirectory(code);
+        File.WriteAllText(Path.Combine(code, "Types.cs"), "namespace Demo { public enum Quality : ulong { None = 0, Max = ulong.MaxValue } public abstract class Action { public int Delay; } public sealed class Damage : Action { public decimal Amount; } }");
+        File.WriteAllText(Path.Combine(code, "Tables.json"), "{\"Entry\":{\"headerRows\":5,\"groups\":{\"Key\":[\"Name\"]}}}");
+        string[] fields = ["Zone", "Id", "Name", "Signed", "Unsigned", "Amount", "Optional", "Values", "Mapping", "Shape", "Action", "Quality", "Lookup", "Secret", "Client", "class"];
+        string[] types = ["string", "int", "string", "long", "ulong", "decimal", "int?", "json<int?[]>", "json<Dictionary<int,string>>", "json<int[,]>", "json<Demo.Action>", "Demo.Quality", "LookupConfig", "string", "string", "string"];
+        string[] first = ["east", "1", "中文😀", long.MinValue.ToString(CultureInfo.InvariantCulture), ulong.MaxValue.ToString(CultureInfo.InvariantCulture), "79228162514264337593543950335", "null", "[null,1,-2]", "{\"7\":\"值\"}", "[[1,2],[3,4]]", "{\"$type\":\"Damage\",\"Delay\":2,\"Amount\":1.25}", "Max", "10", "server-only", "client-only", "keyword"];
+        Write("Entry", fields, types, [first, first.Select((v,i) => i == 0 ? "west" : i == 5 ? "-0.00" : v).ToArray()], true);
+        Write("Lookup", ["Id", "Name", "Peer"], ["int", "string", "LookupConfig"], [["10", "目标", "20"], ["20", "同伴", "10"]], false);
+        // 此表没有多态根字段，父类型仅用于生成继承声明，不得添加二进制标签。
+        Write("Concrete", ["Id", "Payload"], ["int", "json<Demo.Damage>"], [["1", "{\"Delay\":7,\"Amount\":2.5}"]], false);
+        var settings = new WorkspaceSettings(data, output, code, "") { Target = ConfigTarget.Server, CodeLanguages = ["all"], DataFormat = "both" };
+        string project = Path.Combine(root, "portable.zrconfig.json"); settings.SaveProject(project);
+        Check(settings == WorkspaceSettings.LoadProject(project), "语言/格式项目配置往返失败。");
+        var generated = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(true));
+        Check(generated.Success, Describe(generated));
+        Check(!ModelGenerator.Prepare(data, code, new DiagnosticCollector(), target: settings.Target, languages: settings.CodeLanguages, dataFormat: settings.DataFormat)!.HasChanges, "同一输入反复生成有差异。");
+        foreach (string file in new[] { "EntryConfig.g.cs", "Java/EntryConfig.java", "Go/entry.g.go", "Cpp/EntryConfig.hpp", "Lua/EntryConfig.lua", "TypeScript/EntryConfig.ts", "Rust/EntryConfig.rs" })
+        {
+            string source = File.ReadAllText(Path.Combine(code, "Generated", file));
+            Check(source.Contains("字段说明") && !source.Contains("client-only"), "字段说明或分端生成丢失：" + file);
+        }
+        Check(File.ReadAllText(Path.Combine(code, "Generated", "EntryConfig.g.cs")).Contains("&lt;中文&gt; &amp;"), "C# XML 注释未转义。");
+        using (var book = new XLWorkbook(Path.Combine(data, "Entry.xlsx")))
+        {
+            book.Worksheet(1).Cell(4, 1).Value = "修改说明不会改变已有接口 // -- \"说明\"";
+            book.Save();
+        }
+        var commentDiagnostics = new DiagnosticCollector();
+        ModelGenerationPlan commentPlan = ModelGenerator.Prepare(data, code, commentDiagnostics, target: settings.Target, languages: settings.CodeLanguages, dataFormat: settings.DataFormat)!;
+        Check(!commentPlan.HasApiChanges && commentPlan.Apply(commentDiagnostics), "只改说明被误判为七语言 API 变化：" + commentPlan.DescribeChanges());
+        var diagnostics = new DiagnosticCollector();
+        File.WriteAllText(Path.Combine(code, "ServerConsumer.cs"), ServerRuntimeTests.CSharp);
+        using LoadedRules loaded = RuleCompiler.PrepareSources(code, "", Path.Combine(root, "cache"), diagnostics) ?? throw new Exception(string.Join("\n", diagnostics.Snapshot()));
+        ITableCodecRegistry registry = (ITableCodecRegistry)loaded.Assembly.GetType("ZrConfig.Models.TableCodecs")!.GetProperty("Registry")!.GetValue(null)!;
+        ConfigManifest Decode(string text) => JsonSerializer.Deserialize<ConfigManifest>(text, new JsonSerializerOptions { IncludeFields = true })!;
+        var serverCatalog = (ZrConfig.Runtime.Server.Catalog)loaded.Assembly.GetType("ZrConfig.Models.ServerCatalog")!.GetProperty("Instance")!.GetValue(null)!;
+        await ServerRuntimeTests.CheckCSharp(registry, serverCatalog, Decode, output);
+        loaded.Assembly.GetType("ServerConsumer")!.GetMethod("Run")!.Invoke(null, [output]);
+        File.Delete(Path.Combine(code, "ServerConsumer.cs"));
+        using var manager = new ConfigManager(registry, Decode, new ConfigLoadOptions(retainPreviousSnapshots: true, preferJson: true));
+        ConfigSnapshot old = manager.ReloadAll(new FileConfigSource(output));
+        IConfigTable table = old.Tables.Single(t => t.Name == "Entry");
+        var method = table.GetType().GetMethod("Get", [typeof(string), typeof(int)])!;
+        var a = Expression.Parameter(typeof(string)); var b = Expression.Parameter(typeof(int));
+        var get = Expression.Lambda<Func<string,int,object>>(Expression.Convert(Expression.Call(Expression.Constant(table), method, a,b), typeof(object)), a,b).Compile();
+        object row = get("east",1);
+        Check(row.GetType().GetProperty("Client") == null, "服务端模型泄漏客户端字段。");
+        object? Field(string name) => row.GetType().GetProperty(name)!.GetValue(row);
+        Check((long)Field("Signed")! == long.MinValue && (ulong)Field("Unsigned")! == ulong.MaxValue && (decimal)Field("Amount")! == decimal.MaxValue, "JSON 数值边界丢失。");
+        Check(Field("Optional") == null && ((int?[])Field("Values")!)[0] == null && ((int[,])Field("Shape")!)[1,1] == 4, "JSON 集合或空值不一致。");
+        var concrete = old.Tables.Single(t => t.Name == "Concrete");
+        object concreteRow = concrete.GetType().GetMethod("Get", [typeof(int)])!.Invoke(concrete, [1])!;
+        object payload = concreteRow.GetType().GetProperty("Payload")!.GetValue(concreteRow)!;
+        Check((int)payload.GetType().GetField("Delay")!.GetValue(payload)! == 7, "具体子类继承字段读取失败。");
+        for (int i=0;i<100000;i++) _=get("east",1);
+        long start=GC.GetAllocatedBytesForCurrentThread();for(int i=0;i<100000;i++) Check(ReferenceEquals(row,get("east",1)), "查询对象未缓存。");
+        long allocated=GC.GetAllocatedBytesForCurrentThread()-start;Check(allocated==0,"C# 热查询发生分配："+allocated);
+        Console.WriteLine("通过：C# JSON 强类型读取与 100000 次组合键查询，分配 0 B。");
+        var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(output,"current.json")))!;
+        string version = manifest["versionId"]!.GetValue<string>();
+        string jsonFile=Path.Combine(output,"versions",version,"Entry.json");
+        byte[] goodJson=File.ReadAllBytes(jsonFile);
+        var codec=(IConfigJsonCodec)Activator.CreateInstance(loaded.Assembly.GetTypes().Single(t => typeof(ITableCodec).IsAssignableFrom(t)&&t.Name=="EntryConfigCodec"))!;
+        void Bad(Action<JsonNode> corrupt) { var json=JsonNode.Parse(goodJson)!;corrupt(json);Reject(()=>codec.JsonToBinary(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()))); }
+        Bad(n=>n["rows"]![0]!["Amount"]="0.12345678901234567890123456789");
+        Bad(n=>n["rows"]![0]!["Signed"]=9223372036854775807L);
+        Bad(n=>n["rows"]![0]!["Unknown"]=1);
+        Bad(n=>n["rows"]![0]!["Action"]!["$type"]="Unknown");
+        Bad(n=>n["rows"]![0]!["Shape"]!["dimensions"]![0]=3);
+        Reject(()=>ConfigJson.Parse("{\"x\":1,\"x\":2}")); Reject(()=>ConfigJson.Parse("\"\\uD800\""));
+        File.WriteAllText(jsonFile,"broken"); Reject(()=>manager.ReloadAll(new FileConfigSource(output)));
+        Check(ReferenceEquals(old,manager.Current),"损坏重载替换了旧快照。"); File.WriteAllBytes(jsonFile,goodJson);
+        ConfigSnapshot next=manager.ReloadAll(new FileConfigSource(output)); Check(!ReferenceEquals(next,old)&&old.Tables.Count==3&&ReferenceEquals(row,get("east",1)),"旧快照不能继续查询。");
+        manager.Dispose();Check(old.Tables.Count==3,"退休快照受管理器释放影响。");
+        foreach(string format in new[]{"json","binary"})
+        {
+            var exported=ExportPipeline.RunWithSources(data,Path.Combine(root,format),code,"",target:ConfigTarget.Server,dataFormat:format);Check(exported.Success,string.Join("\n",exported.Diagnostics));
+            using var verify=new ConfigManager(registry,Decode);Check(verify.ReloadAll(new FileConfigSource(Path.Combine(root,format))).Tables.Count==3,"单格式加载失败。");
+        }
+        // 重载失败也必须校验双格式版本中未选作主文件的 JSON。
+        var rollback=ReleaseHistory.PrepareRollback(output,version,Path.Combine(output,"current.json"),ConfigTarget.Server);
+        File.WriteAllText(jsonFile,"broken");Reject(()=>ReleaseHistory.Activate(rollback,"损坏文件测试"));File.WriteAllBytes(jsonFile,goodJson);
+        string native = Path.Combine(code,"Generated");
+        string mappedNative = CheckSourceMappings(root,data,code,output);
+        await NativeAsync(mappedNative,output,root,requireNative);
+        var rejected=new DiagnosticCollector();
+        File.WriteAllText(Path.Combine(native,"Go","handwritten.txt"),"保留");
+        var removal = ModelGenerator.Prepare(data,code,rejected,target:ConfigTarget.Server,languages:["csharp"])!;
+        Check(!removal.Apply(rejected,true) && rejected.Snapshot().Any(d=>d.Code=="API_CHANGE_REQUIRED"), "Deleting a language bypassed API protection.");
+        rejected = new DiagnosticCollector();
+        Check(GeneratedApiContractTests.AcceptTestMigration(removal, removal.ApiChangeId!) && removal.Apply(rejected,true),string.Join("\n",rejected.Snapshot()));
+        Check(File.Exists(Path.Combine(native,"Go","handwritten.txt"))&&!File.Exists(Path.Combine(native,"Go","runtime.go")),"语言变更未清理登记文件或删除了手写文件。");
+        File.AppendAllText(Path.Combine(code, "Types.cs"), """
+            namespace Demo {
+                [ZrConfig.Runtime.ConfigConverter(typeof(MoneyConverter), "1")]
+                public struct Money { public int Cents; }
+                public sealed class MoneyConverter : ZrConfig.Runtime.IConfigConverter<Money> {
+                    public Money Parse(string text) => new Money { Cents = int.Parse(text) };
+                    public void Write(System.IO.BinaryWriter writer, Money value) { writer.Write(123); writer.Write(value.Cents); }
+                    public Money Read(System.IO.BinaryReader reader) { reader.ReadInt32(); return new Money { Cents = reader.ReadInt32() }; }
+                }
+            }
+            """);
+        Write("Converted", ["Id", "Value"], ["int", "Demo.Money"], [["1", "7"]], false);
+        var unsupported = new DiagnosticCollector();
+        Check(ModelGenerator.Prepare(data,code,unsupported,target:ConfigTarget.Server,languages:["go"])==null && unsupported.Snapshot().Any(d=>d.Code=="PORTABLE_SCHEMA"),"未声明转换器布局却生成了原生代码。");
+        Check(ModelGenerator.Generate(data,code,new DiagnosticCollector(),target:ConfigTarget.Server),"旧 C# 二进制转换器兼容失败。");
+        string legacy = Path.Combine(root,"legacy");
+        Check(ExportPipeline.RunWithSources(data,legacy,code,"",target:ConfigTarget.Server).Success,"旧自定义转换器不能再导出二进制。");
+        byte[] before=File.ReadAllBytes(Path.Combine(legacy,"current.json"));
+        string converterSource=File.ReadAllText(Path.Combine(code,"Types.cs")).Replace("public struct Money", "[ZrConfig.Runtime.ConfigWireLayout(nameof(Cents))] public struct Money");
+        File.WriteAllText(Path.Combine(code,"Types.cs"),converterSource);
+        var converterDiagnostics = new DiagnosticCollector();
+        var convertedPlan = ModelGenerator.Prepare(data,code,converterDiagnostics,target:ConfigTarget.Server,languages:["all"])!;
+        if (convertedPlan.HasApiChanges) Check(GeneratedApiContractTests.AcceptTestMigration(convertedPlan, convertedPlan.ApiChangeId!), "Converter migration approval failed.");
+        Check(convertedPlan.Apply(converterDiagnostics, true),string.Join("\n",converterDiagnostics.Snapshot()));
+        Check(!ExportPipeline.RunWithSources(data,legacy,code,"",target:ConfigTarget.Server).Success && before.SequenceEqual(File.ReadAllBytes(Path.Combine(legacy,"current.json"))),"纯二进制原生发布未拒绝错误转换器布局或覆盖了旧版本。");
+        Console.WriteLine("通过：多语言生成、两种数据格式、精度/损坏检查、原子重载、旧快照及生成事务。");
+
+        void Write(string name,string[] names,string[] ts,string[][] rows,bool targets)
+        {
+            using var book=new XLWorkbook();var sheet=book.AddWorksheet(name);
+            for(int i=0;i<names.Length;i++)
+            {
+                sheet.Cell(1,i+1).Value=names[i];sheet.Cell(2,i+1).Value=ts[i];
+                if(i==0||name=="Entry"&&i==1)sheet.Cell(3,i+1).Value="主键";
+                if(i!=names.Length-1)sheet.Cell(4,i+1).Value="字段说明 <中文> & \"备注\"\n第二行\\   ";
+                sheet.Cell(5,i+1).Value=targets&&names[i]=="Secret"?"S":targets&&names[i]=="Client"?"C":"CS";
+                for(int r=0;r<rows.Length;r++)sheet.Cell(r+6,i+1).Value=rows[r][i];
+            }
+            book.SaveAs(Path.Combine(data,name+".xlsx"));
+        }
+    }
+    private static string CheckSourceMappings(string root,string originalData,string originalCode,string originalOutput)
+    {
+        string mapped=Path.Combine(root,"source-mapped"),data=Path.Combine(mapped,"Data"),code=Path.Combine(mapped,"Config");
+        Directory.CreateDirectory(data);Directory.CreateDirectory(code);
+        foreach(string file in Directory.GetFiles(originalData,"*.xlsx"))File.Copy(file,Path.Combine(data,Path.GetFileName(file)));
+        foreach(string file in Directory.GetFiles(originalCode,"*",SearchOption.AllDirectories))
+        {
+            string relative=Path.GetRelativePath(originalCode,file);
+            if(relative.Split(Path.DirectorySeparatorChar).Any(p=>p.Contains("cache",StringComparison.Ordinal)||p is "bin" or "obj")||relative.EndsWith(".lock",StringComparison.Ordinal))continue;
+            string target=Path.Combine(code,relative);Directory.CreateDirectory(Path.GetDirectoryName(target)!);File.Copy(file,target);
+        }
+        GeneratedApiContract Baseline()=>JsonSerializer.Deserialize<SchemaSummary>(File.ReadAllText(Path.Combine(code,".schema.json")))!.ApiContract!;
+        GeneratedApiContract before=Baseline();
+        using(var book=new XLWorkbook(Path.Combine(data,"Entry.xlsx")))
+        {
+            var sheet=book.Worksheet(1);for(int row=1;row<=sheet.LastRowUsed()!.RowNumber();row++){var first=sheet.Cell(row,1).Value;sheet.Cell(row,1).Value=sheet.Cell(row,2).Value;sheet.Cell(row,2).Value=first;}book.Save();
+        }
+        var diagnostics=new DiagnosticCollector();
+        var reordered=ModelGenerator.Prepare(data,code,diagnostics,target:ConfigTarget.Server,languages:["all"],dataFormat:"both");
+        Check(reordered!=null&&!reordered.HasChanges,"Moving source columns changed accepted API/order: "+reordered?.DescribeChanges()+string.Join("\n",diagnostics.Snapshot()));
+        using(var book=new XLWorkbook(Path.Combine(data,"Entry.xlsx"))){book.Worksheet(1).Cell(1,3).Value="Label";book.Worksheet(1).Cell(2,13).Value="TargetsConfig";book.Save();}
+        using(var book=new XLWorkbook(Path.Combine(data,"Lookup.xlsx"))){book.Worksheet(1).Name="Targets";book.Worksheet(1).Cell(2,3).Value="TargetsConfig";book.Save();}
+        void Remap(SourceNameMapping[] mappings)
+        {
+            var plan=ModelGenerator.PrepareWithSourceMappings(mappings,null,"auto",data,code,diagnostics,target:ConfigTarget.Server,languages:["all"],dataFormat:"both");
+            Check(plan!=null&&plan.HasApiChanges,"Explicit source mapping was not reviewed: "+string.Join("\n",diagnostics.Snapshot()));
+            Check(!plan!.Apply(new DiagnosticCollector(),true),"Ordinary confirmation accepted a source identity change.");
+            // A unit receipt tests the transaction; unchanged real consumers run below in all seven toolchains.
+            Check(GeneratedApiContractTests.AcceptTestMigration(plan,plan.ApiChangeId!)&&plan.Apply(diagnostics,true),string.Join("\n",diagnostics.Snapshot()));
+        }
+        Remap([new("Lookup",null,"Targets"),new("Entry","Name","Label")]);
+        using(var book=new XLWorkbook(Path.Combine(data,"Entry.xlsx"))){book.Worksheet(1).Cell(1,3).Value="DisplayName";book.Save();}
+        Remap([new("Entry","Name","DisplayName")]);
+        GeneratedApiContract after=Baseline();
+        Check(before.Symbols.SequenceEqual(after.Symbols)&&before.CompiledSymbols!.SequenceEqual(after.CompiledSymbols!)&&before.NativeFiles.SequenceEqual(after.NativeFiles)&&before.Policy!.Names.SequenceEqual(after.Policy!.Names),"Source rename changed public API, source binding or stable SymbolId.");
+        Check(!ModelGenerator.Prepare(data,code,diagnostics,target:ConfigTarget.Server,languages:["all"],dataFormat:"both")!.HasChanges,"Accepted source mapping not inherited.");
+        foreach(var invalid in new[]{new[]{new SourceNameMapping("Entry","Missing","X")},new[]{new SourceNameMapping("Entry","Name","Id")},new[]{new SourceNameMapping("Entry","Name","X"),new SourceNameMapping("Entry","Name","Y")}})
+            Check(ModelGenerator.PrepareWithSourceMappings(invalid,null,"auto",data,code,new DiagnosticCollector(),target:ConfigTarget.Server,languages:["all"])==null,"Unknown or ambiguous source mapping was accepted.");
+        string output=Path.Combine(mapped,"Output");var exported=ExportPipeline.RunWithSources(data,output,code,"",target:ConfigTarget.Server,dataFormat:"both");Check(exported.Success,string.Join("\n",exported.Diagnostics));
+        var original=JsonNode.Parse(File.ReadAllText(Path.Combine(originalOutput,"current.json")))!;var current=JsonNode.Parse(File.ReadAllText(Path.Combine(output,"current.json")))!;
+        Check(original["tables"]!.ToJsonString()==current["tables"]!.ToJsonString(),"Source rename/reorder changed table identity, bytes or hashes.");
+        using var compiled=RuleCompiler.PrepareSources(code,"",Path.Combine(mapped,"cache"),diagnostics)??throw new Exception(string.Join("\n",diagnostics.Snapshot()));
+        var assemblyExport=ExportPipeline.Run(data,Path.Combine(mapped,"AssemblyOutput"),compiled.Assembly,ConfigTarget.Server,"both");Check(assemblyExport.Success,string.Join("\n",assemblyExport.Diagnostics));
+        Check(!ModelGenerator.PrepareWithSourceMappings([],null,"auto",data,code,new DiagnosticCollector(),target:ConfigTarget.Server,languages:["all"],dataFormat:"both")!.HasChanges,"An empty mapping request removed accepted mappings.");
+        using(var book=new XLWorkbook(Path.Combine(data,"Entry.xlsx"))){book.Worksheet(1).Cell(1,3).Value="Name";book.Worksheet(1).Cell(2,13).Value="LookupConfig";book.Save();}
+        using(var book=new XLWorkbook(Path.Combine(data,"Lookup.xlsx"))){book.Worksheet(1).Name="Lookup";book.Worksheet(1).Cell(2,3).Value="LookupConfig";book.Save();}
+        SourceNameMapping[] reset=[new("Lookup",null,"Lookup"),new("Entry","Name","Name")];
+        var resetPlan=ModelGenerator.PrepareWithSourceMappings(reset,null,"auto",data,code,new DiagnosticCollector(),target:ConfigTarget.Server,languages:["all"],dataFormat:"both")!;
+        Check(resetPlan.HasApiChanges,"Mapping reset bypassed review.");
+        string mappingFile=Path.Combine(mapped,"reset-mappings.json"),receiptFile=Path.Combine(mapped,"reset-unit-receipt.json");
+        File.WriteAllText(mappingFile,JsonSerializer.Serialize(reset));File.WriteAllText(receiptFile,JsonSerializer.Serialize(GeneratedApiContractTests.CreateTestReceipt(resetPlan)));
+        string[] command=["codegen",data,code,"--target","S","--languages","all","--format","both","--source-map",mappingFile,"--accept-api-change",resetPlan.ApiChangeId!,"--migration-receipt",receiptFile];
+        Check(ToolCommandLine.Parse(command).SourceMappingsFile==mappingFile,"CLI source-map option lost.");
+        using var log=new StringWriter();Check(ToolCommandRunner.Run(command,log,log)==0,log.ToString());
+        Check((Baseline().Policy!.SourceMappings?.Length??0)==0&&before.Symbols.SequenceEqual(Baseline().Symbols),"Explicit mapping reset changed API or retained aliases.");
+        var resetExport=ExportPipeline.RunWithSources(data,Path.Combine(mapped,"ResetOutput"),code,"",target:ConfigTarget.Server,dataFormat:"both");Check(resetExport.Success,string.Join("\n",resetExport.Diagnostics));
+        var resetManifest=JsonNode.Parse(File.ReadAllText(Path.Combine(mapped,"ResetOutput","current.json")))!;
+        Check(original["tables"]!.ToJsonString()==resetManifest["tables"]!.ToJsonString(),"Mapping reset changed exported identity or bytes.");
+        Console.WriteLine("通过：列移动、源表/字段两次重命名保留公开 API、SymbolId、参数顺序与两种数据字节；源码和 DLL 导出均继承映射。");
+        Console.WriteLine("通过：空映射保留当前绑定；CLI 显式恢复源名需迁移凭据，恢复后公开 API 与双格式字节不变。");
+        return Path.Combine(code,"Generated");
+    }
+    private static string Describe(ProjectWorkflowResult result)=>string.Join("\n",result.PreparationDiagnostics.Concat(result.Export?.Diagnostics??[]));
+    private static void Check(bool ok,string message){if(!ok)throw new InvalidOperationException(message);}
+    private static void Reject(Action action){try{action();}catch(Exception){return;}throw new InvalidOperationException("错误输入未拒绝。");}
+
+    internal static string[] CppArguments(string compiler,IReadOnlyList<string> arguments)
+    {
+        if(!Path.GetFileNameWithoutExtension(compiler).Equals("cl",StringComparison.OrdinalIgnoreCase))return arguments.ToArray();
+        var result=new List<string>{"/nologo","/std:c++17","/EHsc","/utf-8","/permissive-","/Zc:__cplusplus","/Zc:preprocessor","/W4","/WX"};
+        for(int i=0;i<arguments.Count;i++)
+        {
+            string arg=arguments[i];
+            switch(arg)
+            {
+                case "-std=c++17":case "-Wall":case "-Wextra":case "-Werror":case "-pedantic":case "-pthread":break;
+                case "-O2":result.Add("/O2");break;
+                case "-O1":result.Add("/O1");break;
+                case "-g":result.Add("/Zi");break;
+                case "-I":result.Add("/I"+arguments[++i]);break;
+                case "-o":result.Add("/Fe:"+arguments[++i]);break;
+                default:
+                    if(arg.StartsWith('-'))throw new NotSupportedException("MSVC verification does not support flag: "+arg);
+                    result.Add(arg);break;
+            }
+        }
+        return result.ToArray();
+    }
+    private static Task CompileCpp(string compiler,string[] arguments,string root)=>Run(compiler,CppArguments(compiler,arguments),root);
+    private static async Task<string[]> CheckNamespaces(string root,string output,string javac,string java,string go,string cpp)
+    {
+        var paths=new List<string>();
+        foreach(string id in new[]{"a","b"})
+        {
+            string code=Path.Combine(root,"namespaces-"+id);Directory.CreateDirectory(code);
+            foreach(string file in new[]{"Types.cs","Tables.json"})File.Copy(Path.Combine(root,"Config",file),Path.Combine(code,file));
+            var profile=new GenerationNamespaces(CSharp:"Game"+id.ToUpperInvariant()+".Config",Java:"game"+id+".config",Go:"example.invalid/game"+id,Cpp:"game"+id+"::config",Rust:"game"+id,TypeScript:"game-"+id,Lua:"game"+id+".config");
+            var diagnostics=new DiagnosticCollector();
+            var plan=ModelGenerator.PrepareWithNamespaces(profile,"server-v1",Path.Combine(root,"Data"),code,diagnostics,target:ConfigTarget.Server,languages:["all"],dataFormat:"both");
+            Check(plan!=null&&plan.Apply(diagnostics),string.Join("\n",diagnostics.Snapshot())+plan?.DescribeChanges());
+            var repeated=ModelGenerator.Prepare(Path.Combine(root,"Data"),code,diagnostics,target:ConfigTarget.Server,languages:["all"],dataFormat:"both");
+            Check(repeated!=null&&!repeated.HasChanges,"Accepted module roots were not inherited: "+repeated?.DescribeChanges());
+            var settings=new WorkspaceSettings(Path.Combine(root,"Data"),output,code,""){Namespaces=profile,CodeLanguages=["all"],Target=ConfigTarget.Server};
+            string project=Path.Combine(code,"profile.zrconfig.json");settings.SaveProject(project);Check(WorkspaceSettings.LoadProject(project).Namespaces==profile,"Module roots lost during project roundtrip");
+            using var compiled=RuleCompiler.PrepareSources(code,"",Path.Combine(root,"namespace-cache-"+id),diagnostics)??throw new Exception(string.Join("\n",diagnostics.Snapshot()));
+            var catalog=(ZrConfig.Runtime.Server.Catalog)compiled.Assembly.GetType("Game"+id.ToUpperInvariant()+".Config.ServerCatalog")!.GetProperty("Instance")!.GetValue(null)!;
+            using var manager=new ZrConfig.Runtime.Server.Manager(catalog,text=>JsonSerializer.Deserialize<ConfigManifest>(text,new JsonSerializerOptions{IncludeFields=true})!);
+            var snapshot=manager.Reload(new FileConfigSource(output)).Snapshot;
+            Check(snapshot.AsLegacySnapshot().Tables.Single(t=>t.Name=="Entry").Rows[0]!.GetType().Namespace=="Game"+id.ToUpperInvariant()+".Config","Custom CLR model namespace missing");
+            paths.Add(Path.Combine(code,"Generated"));
+        }
+        string main=Path.Combine(root,"TwoCatalogs.java"),classes=Path.Combine(root,"two-java");Directory.CreateDirectory(classes);
+        File.WriteAllText(main,"public class TwoCatalogs{public static void main(String[] args)throws Exception{var root=java.nio.file.Path.of(args[0]);var a=gamea.config.DataSnapshot.load(root,gamea.config.ConfigRuntime.LoadPlan.defaults(),new gamea.config.ConfigRuntime.Cancellation());var b=gameb.config.DataSnapshot.load(root,gameb.config.ConfigRuntime.LoadPlan.defaults(),new gameb.config.ConfigRuntime.Cancellation());if(a.get_Entry().get(\"east\",1).getId()!=b.get_Entry().get(\"east\",1).getId())throw new AssertionError();}}");
+        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..paths.SelectMany(p=>Directory.GetFiles(Path.Combine(p,"Java"),"*.java")),main],root);await Run(java,["-cp",classes,"TwoCatalogs",output],root);
+        string goRoot=Path.Combine(root,"two-go");Directory.CreateDirectory(goRoot);
+        File.WriteAllText(Path.Combine(goRoot,"go.mod"),"module consumer\n\ngo 1.19\nrequire (\nexample.invalid/gamea v0.0.0\nexample.invalid/gameb v0.0.0\n)\nreplace example.invalid/gamea => "+JsonSerializer.Serialize(Path.Combine(paths[0],"Go"))+"\nreplace example.invalid/gameb => "+JsonSerializer.Serialize(Path.Combine(paths[1],"Go"))+"\n");
+        File.WriteAllText(Path.Combine(goRoot,"main.go"),"package main\nimport(\"context\";\"os\";a \"example.invalid/gamea\";b \"example.invalid/gameb\")\nfunc main(){x,e:=a.LoadData(context.Background(),os.Args[1],a.LoadPlan{});if e!=nil{panic(e)};y,e:=b.LoadData(context.Background(),os.Args[1],b.LoadPlan{});if e!=nil{panic(e)};xt,_:=x.Get_Entry();yt,_:=y.Get_Entry();xr,_:=xt.Get(\"east\",1);yr,_:=yt.Get(\"east\",1);if xr.Id()!=yr.Id(){panic(\"catalog mismatch\")}}\n");
+        await Run(go,["run","-race",".",output],goRoot,new(){["GO111MODULE"]="on",["GOWORK"]="off",["GOCACHE"]=Path.Combine(root,"gocache")});
+        string cppMain=Path.Combine(root,"two.cpp"),binary=Path.Combine(root,OperatingSystem.IsWindows()?"two-cpp.exe":"two-cpp");
+        File.WriteAllText(cppMain,"#include "+JsonSerializer.Serialize(Path.Combine(paths[0],"Cpp","data.hpp").Replace('\\','/'))+"\n#include "+JsonSerializer.Serialize(Path.Combine(paths[1],"Cpp","data.hpp").Replace('\\','/'))+"\nint main(int argc,char** argv){if(argc!=2)return 2;gamea::config::Cancellation a;gameb::config::Cancellation b;auto x=gamea::config::data::Snapshot::load(argv[1],gamea::config::LoadPlan{},a);auto y=gameb::config::data::Snapshot::load(argv[1],gameb::config::LoadPlan{},b);return x->get_Entry(\"east\",1).Id()==y->get_Entry(\"east\",1).Id()?0:1;}\n");
+        await CompileCpp(cpp,["-std=c++17","-O2","-pthread",cppMain,"-o",binary],root);await Run(binary,[output],root);
+        Console.WriteLine("通过：C#/Java/Go/C++ 自定义模块根、继承固定配置及同进程双 Catalog。");return paths.ToArray();
+    }
+    private static async Task NativeAsync(string generated,string output,string root,bool required)
+    {
+        // No table payloads are copied: catalog mismatches must fail before any payload I/O.
+        foreach (string kind in new[] { "extra", "missing", "replaced" })
+        {
+            var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(output, "current.json")))!;
+            var tables = manifest["tables"]!.AsArray();
+            JsonNode ghost = tables[0]!.DeepClone();
+            ghost["name"] = "Ghost"; ghost["file"] = "Ghost.bytes"; ghost["jsonFile"] = "Ghost.json";
+            if (kind != "extra") tables.RemoveAt(0);
+            if (kind != "missing") tables.Add(ghost);
+            Directory.CreateDirectory(output + "-" + kind);
+            File.WriteAllText(Path.Combine(output + "-" + kind, "current.json"), manifest.ToJsonString());
+        }
+        string? Find(string env,string file)
+        {
+            string? explicitPath=Environment.GetEnvironmentVariable(env);
+            if(!string.IsNullOrEmpty(explicitPath)&&File.Exists(explicitPath))return explicitPath;
+            foreach(string path in (Environment.GetEnvironmentVariable("PATH")??"").Split(Path.PathSeparator))
+                if(File.Exists(Path.Combine(path,file)))return Path.Combine(path,file);
+            return null;
+        }
+        string? javac=Find("ZRCONFIG_JAVAC",OperatingSystem.IsWindows()?"javac.exe":"javac"),go=Find("ZRCONFIG_GO",OperatingSystem.IsWindows()?"go.exe":"go"),cpp=Find("ZRCONFIG_CXX",OperatingSystem.IsWindows()?"clang++.exe":"clang++");
+        if(javac==null||go==null||cpp==null)
+        {
+            Check(!required,"跨语言验收需要 Java 17+、Go 1.19+、C++17；可用 ZRCONFIG_JAVAC/ZRCONFIG_GO/ZRCONFIG_CXX 指定。");
+            Console.WriteLine("跳过原生编译验收：未配置全部工具链；使用 --portable-native 强制验收。");return;
+        }
+        string java=Path.Combine(Path.GetDirectoryName(javac)!,OperatingSystem.IsWindows()?"java.exe":"java");
+        string javaMain=Path.Combine(root,"NativeCheck.java");File.WriteAllText(javaMain,JavaCheck);
+        string classes=Path.Combine(root,"classes");Directory.CreateDirectory(classes);
+        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..Directory.GetFiles(Path.Combine(generated,"Java"),"*.java"),javaMain],root);
+        await Run(java,["-cp",classes,"NativeCheck",output],root);
+        string javaServer=Path.Combine(root,"ServerCheck.java");File.WriteAllText(javaServer,ServerRuntimeTests.Java);
+        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-cp",classes,"-d",classes,javaServer],root);
+        await Run(java,["-cp",classes,"ServerCheck",output],root);
+        File.WriteAllText(Path.Combine(generated,"Go","native_test.go"),GoCheck);
+        File.WriteAllText(Path.Combine(generated,"Go","server_test.go"),ServerRuntimeTests.Go);
+        await Run(go,["test","-race","-v","."],Path.Combine(generated,"Go"),new(){["GO111MODULE"]="off",["ZRCONFIG_TEST_OUTPUT"]=output,["GOCACHE"]=Path.Combine(root,"gocache")});
+        string cppMain=Path.Combine(root,"native.cpp"),executable=Path.Combine(root,OperatingSystem.IsWindows()?"native.exe":"native");File.WriteAllText(cppMain,CppCheck);
+        await CompileCpp(cpp,["-std=c++17","-O2","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(generated,"Cpp"),cppMain,"-o",executable],root);
+        await Run(executable,[output],root);
+        string serverMain=Path.Combine(root,"server.cpp"),serverExecutable=Path.Combine(root,OperatingSystem.IsWindows()?"server.exe":"server");
+        File.WriteAllText(serverMain,ServerRuntimeTests.Cpp);
+        await CompileCpp(cpp,["-std=c++17","-O2","-Wall","-Wextra","-pedantic","-Werror","-pthread","-I",Path.Combine(generated,"Cpp"),serverMain,"-o",serverExecutable],root);
+        await Run(serverExecutable,[output],root);
+        string macroMain=Path.Combine(root,"macros.cpp");
+        File.WriteAllText(macroMain,string.Join("\n",File.ReadLines(Path.Combine(generated,"Cpp","runtime.hpp")).Where(line=>line.StartsWith("#include ",StringComparison.Ordinal)))+"\n#define min(a,b) broken_min_macro(a,b)\n#define max(a,b) broken_max_macro(a,b)\n#include \"data.hpp\"\n#ifndef min\n#error min macro lost\n#endif\n#ifndef max\n#error max macro lost\n#endif\nint main(){return 0;}\n");
+        await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(generated,"Cpp"),macroMain,"-o",Path.Combine(root,"macros")],root);
+        string? sanitizers=Environment.GetEnvironmentVariable("ZRCONFIG_CPP_SANITIZERS");
+        if(!string.IsNullOrEmpty(sanitizers))
+        {
+            if(sanitizers is not ("address,undefined" or "thread"))throw new InvalidOperationException("Unknown C++ sanitizer selection.");
+            string sanitized=Path.Combine(root,"server-sanitized");
+            await CompileCpp(cpp,["-std=c++17","-O1","-g","-fno-omit-frame-pointer","-fsanitize="+sanitizers,"-pthread","-I",Path.Combine(generated,"Cpp"),serverMain,"-o",sanitized],root);
+            await Run(sanitized,[output],root,new(){["UBSAN_OPTIONS"]="halt_on_error=1:print_stacktrace=1",["ASAN_OPTIONS"]="halt_on_error=1",["TSAN_OPTIONS"]="halt_on_error=1"});
+        }
+
+
+        // A table include historically makes unrelated row pointer types visible.
+        // The shared forward declarations for large catalogs must preserve that
+        // source contract, including when the complete snapshot is not included.
+        foreach(bool server in new[]{false,true})
+        {
+            string boundary=Path.Combine(root,server?"large-forward-server":"large-forward-legacy");
+            var scalar=new PortableType("System.Int32","primitive","int32",false,0,null,null,[],[],[],false,null,new());
+            var stringType=new PortableType("System.String","primitive","string",false,0,null,null,[],[],[],false,null,new());
+            var tables=Enumerable.Range(0,257).Select(i=>{
+                string name=i==3?"zrconfig":i is 1 or 2?"ZrConfigSnapshotPart"+(i-1).ToString(CultureInfo.InvariantCulture):"Forward"+i.ToString("D3",CultureInfo.InvariantCulture);
+                string target=i==0?"Forward256":"Forward000";
+                var reference=new PortableType("ref:ZrConfig.Models."+target+"Config:Id:System.Int32","tablereference","int32",false,0,null,null,[],[],[],false,null,new()){ReferenceTable=target};
+                return new PortableTable(name,new string('A',64),true,i is 0 or 256?[new("Id",scalar.Id),new("Peer",reference.Id)]:i==1?[new("Id",scalar.Id),new("Text",stringType.Id)]:[new("Id",scalar.Id)],i==1?["Id","Text"]:["Id"],i==1?[new("ById",["Id"]),new("ByText",["Text"]),new("ByTextAndId",["Text","Id"])]:[new("ById",["Id"])],i is 0 or 256?[scalar,reference]:i==1?[scalar,stringType]:[scalar],[]);
+            }).ToArray();
+            var sources=new Dictionary<string,string>(StringComparer.Ordinal);
+            var largeLanguages=ExportOptions.Languages(["all"]);
+            var largeNames=GeneratedSymbolPlan.Create([],tables,largeLanguages,server);largeNames.Target="C";
+            NativeGenerator.Generate(tables,largeLanguages,sources,largeNames);
+            foreach(var file in sources){string path=Path.Combine(boundary,file.Key);Directory.CreateDirectory(Path.GetDirectoryName(path)!);File.WriteAllText(path,file.Value);}
+            string boundaryOutput=Path.Combine(boundary,"Output"),boundaryVersion=Path.Combine(boundaryOutput,"versions","boundary");Directory.CreateDirectory(boundaryVersion);
+            var entries=new List<object>();
+            foreach(var table in tables)
+            {
+                var row=table.Fields.ToDictionary(field=>field.Name,field=>field.Type==stringType.Id?(object)"owned-key":1,StringComparer.Ordinal);
+                byte[] bytes=JsonSerializer.SerializeToUtf8Bytes(new{format="ZrConfig.TableJson/1",table=table.Name,schemaHash=table.Hash,rows=new[]{row}});
+                string file=table.Name+".json";File.WriteAllBytes(Path.Combine(boundaryVersion,file),bytes);
+                entries.Add(new{name=table.Name,file,rows=1,schemaHash=table.Hash,sha256=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(bytes))});
+            }
+            File.WriteAllText(Path.Combine(boundaryOutput,"current.json"),JsonSerializer.Serialize(new{format="ZrConfig.Json/1",target="C",versionId="boundary",createdUtc="2026-10-16T00:00:00Z",codeFingerprint=new string('A',64),tables=entries}));
+            string include=Path.Combine(boundary,"forward.cpp"),binary=Path.Combine(boundary,OperatingSystem.IsWindows()?"forward.exe":"forward");
+            File.WriteAllText(include,"#include \"Forward000Config.hpp\"\nzrconfig::Forward256Config* other=nullptr;\n#include \""+(server?"data.hpp":"snapshot.hpp")+"\"\n#include <cassert>\nint main(int,char** argv){assert(other==nullptr);std::filesystem::path root(argv[1]);auto legacy=zrconfig::ConfigSnapshot::load(root,true);assert(legacy->Forward000().get(1).Peer()->Peer()->Id()==1);"+(server?LargeCppBoundary:"")+"}\n");
+            await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(boundary,"Cpp"),include,"-o",binary],root);
+            await Run(binary,[boundaryOutput],root);
+            string javaConsumer=Path.Combine(boundary,"Boundary.java"),javaClasses=Path.Combine(boundary,"classes");
+            File.WriteAllText(javaConsumer,"import zrconfig.*;\nimport static zrconfig.ConfigRuntime.*;\n"+(server?"import zrconfig.DataSnapshot.Forward000Row;\nimport static zrconfig.DataSnapshot.warmupRow_Forward000;\n":"")+"public class Boundary {\nstatic void check(boolean value){if(!value)throw new AssertionError();}\n"+
+                "static Forward000Config.Table legacy(ConfigSnapshot value){return value.Forward000;}\n"+
+                (server?"static Forward000Row row(DataSnapshot value){DataSnapshot.Forward000Table table=value.get_Forward000();return table.get(1);}\nstatic DataSnapshot.Warmup warm(){java.util.function.IntFunction<DataSnapshot.Warmup> call=DataSnapshot::warmupRow_Forward000;return call.apply(1);}\nstatic DataSnapshot.Warmup imported(){return warmupRow_Forward000(1);}\nstatic Forward256Config.Table selected(SelectedSnapshot value){return value.get_Forward256();}\n":"")+
+                "public static void main(String[] args)throws Exception{if(ConfigSnapshot.class.getField(\"Forward000\").getType()!=Forward000Config.Table.class)throw new AssertionError();"+
+                (server?"if(!DataSnapshot.Forward000Row.class.getCanonicalName().equals(\"zrconfig.DataSnapshot.Forward000Row\")||DataSnapshot.class.getMethod(\"warmupRow_Forward000\",int.class).getReturnType()!=DataSnapshot.Warmup.class||DataSnapshot.Forward000Table.class.getMethod(\"get\",int.class).getReturnType()!=DataSnapshot.Forward000Row.class)throw new AssertionError();":"")+"var root=java.nio.file.Path.of(args[0]);check(ConfigSnapshot.load(root,true).Forward000.get(1).getPeer().getPeer().getId()==1);"+(server?LargeJavaBoundary:"")+"}\n}\n");
+            await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",javaClasses,..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java"),javaConsumer],root);
+            await Run(java,["-cp",javaClasses,"Boundary",boundaryOutput],root);
+            File.WriteAllText(Path.Combine(boundary,"Go","boundary_test.go"),"package zrconfig\nimport (\"testing\""+(server?";\"context\"":"")+")\nfunc TestLargeBoundary(t *testing.T){root:="+JsonSerializer.Serialize(boundaryOutput)+";legacy,err:=LoadConfig(root,true);if err!=nil{t.Fatal(err)};if legacy.Forward000().Get(1).Peer().Peer().Id()!=1{t.Fatal(\"legacy reference cycle\")};"+(server?LargeGoBoundary:"")+"}\n");
+            await Run(go,["test","."],Path.Combine(boundary,"Go"),new(){["GO111MODULE"]="off",["GOCACHE"]=Path.Combine(root,"gocache")});
+        }
+        Console.WriteLine("通过：257 表保留 C++ 单表头文件跨表类型可见性，以及 Java 字段、嵌套类型、静态导入和方法引用，兼容旧入口与 server-v1。");
+
+        foreach(bool server in new[]{false,true})
+        {
+            string boundary=Path.Combine(root,server?"empty-server":"empty-legacy"); Directory.CreateDirectory(boundary);
+            var sources=new Dictionary<string,string>(StringComparer.Ordinal);
+            NativeGenerator.Generate([],ExportOptions.Languages(["all"]),sources,GeneratedSymbolPlan.Create([],[],ExportOptions.Languages(["all"]),server));
+            foreach(var file in sources){string path=Path.Combine(boundary,file.Key);Directory.CreateDirectory(Path.GetDirectoryName(path)!);File.WriteAllText(path,file.Value);}
+            await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",Path.Combine(boundary,"classes"),..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java")],root);
+            await Run(go,["test","."],Path.Combine(boundary,"Go"),new(){["GO111MODULE"]="off",["GOCACHE"]=Path.Combine(root,"gocache")});
+            string include=Path.Combine(boundary,"check.cpp");File.WriteAllText(include,"#include \""+(server?"data.hpp":"snapshot.hpp")+"\"\nint main(){return 0;}\n");
+            await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(boundary,"Cpp"),include,"-o",Path.Combine(boundary,"check")],root);
+        }
+        string[] namespaceRoots=await CheckNamespaces(root,output,javac,java,go,cpp);
+        await AdditionalLanguageTests.RunAsync(generated,output,root,required,namespaceRoots);
+        string names = Path.Combine(root, "go-names"), nameData = Path.Combine(names, "Data"), nameCode = Path.Combine(names, "Config");
+        Directory.CreateDirectory(nameData);
+        using (var book = new XLWorkbook())
+        {
+            var sheet = book.AddWorksheet("_Item"); sheet.Cell(1, 1).Value = "Id"; sheet.Cell(2, 1).Value = "int";
+            sheet.Cell(3, 1).Value = "主键"; sheet.Cell(5, 1).Value = "CS";
+            sheet.CopyTo("java"); // A valid field name must not shadow a package-qualified expression in generated code.
+            book.SaveAs(Path.Combine(nameData, "Input.xlsx"));
+        }
+        var diagnostics = new DiagnosticCollector();
+        Check(ModelGenerator.Generate(nameData, nameCode, diagnostics, languages: ["go", "java"]), string.Join("\n", diagnostics.Snapshot()));
+        await Run(go, ["test", "."], Path.Combine(nameCode, "Generated", "Go"), new() { ["GO111MODULE"] = "off", ["GOCACHE"] = Path.Combine(root, "gocache") });
+        await Run(javac, ["--release", "17", "-encoding", "UTF-8", "-d", Path.Combine(names, "classes"), .. Directory.GetFiles(Path.Combine(nameCode, "Generated", "Java"), "*.java")], root);
+    }
+    private static async Task Run(string file,string[] arguments,string directory,Dictionary<string,string>? environment=null)
+    {
+        var start=new ProcessStartInfo(file){WorkingDirectory=directory,RedirectStandardOutput=true,RedirectStandardError=true,UseShellExecute=false};
+        foreach(string arg in arguments)start.ArgumentList.Add(arg);
+        if(environment!=null)foreach(var p in environment)start.Environment[p.Key]=p.Value;
+        using var process=Process.Start(start)??throw new Exception("进程启动失败："+file);
+        Task<string> stdout=process.StandardOutput.ReadToEndAsync(),stderr=process.StandardError.ReadToEndAsync();
+        try{await process.WaitForExitAsync().WaitAsync(TimeSpan.FromMinutes(3));}catch{process.Kill(true);throw;}
+        string text=await stdout+await stderr;Check(process.ExitCode==0,file+"\n"+text);Console.WriteLine(text.Trim());
+    }
+    private const string JavaCheck = """
+        import zrconfig.*;import java.nio.file.*;import java.lang.management.*;
+        public class NativeCheck {
+          static volatile int sink;
+          static long probe(com.sun.management.ThreadMXBean bean,ConfigSnapshot s){long id=Thread.currentThread().getId();long before=bean.getThreadAllocatedBytes(id);for(int i=0;i<100000;i++){sink=s.Entry.get("east",1).getId()+s.Entry.getById(1).size();}return bean.getThreadAllocatedBytes(id)-before;}
+          static void check(boolean v){if(!v)throw new AssertionError();}
+          public static void main(String[] args)throws Exception {
+            var root=Path.of(args[0]);var manager=new ConfigSnapshot.Manager();
+            for(boolean json:new boolean[]{false,true}) {
+              var s=manager.reload(root,json);var row=s.Entry.get("east",1);
+              check(s.Concrete.get(1).getPayload().getDelay()==7);
+              check(row.getName().equals("中文😀")&&row.getSigned()==Long.MIN_VALUE&&row.getUnsigned().toString().equals("18446744073709551615"));
+              check(row.getAmount().toString().equals("79228162514264337593543950335")&&row.getOptional()==null&&row.getValues().get(0)==null&&row.getShape().at(3)==4);
+              check(row.getMapping().get(7).equals("值")&&row.getLookup()==s.Lookup.get(10)&&row.getLookup().getPeer().getPeer()==row.getLookup());
+              check(row.getAction() instanceof ConfigTypes.T_Demo_Damage&&row.getQuality()==ConfigTypes.T_Demo_Quality.T_Max);
+              check(row.getclass().equals("keyword")&&s.Entry.get("west",1)!=row&&s.Entry.getById(1).size()==2&&s.Entry.getKey("中文😀").size()==2);
+              for(int i=0;i<200000;i++){sink=s.Entry.get("east",1).getId()+s.Entry.getById(1).size();}
+              var bean=(com.sun.management.ThreadMXBean)ManagementFactory.getThreadMXBean();bean.setThreadAllocatedMemoryEnabled(true);for(int warm=0;warm<5;warm++)probe(bean,s);
+              long allocated=probe(bean,s);if(allocated!=0)throw new AssertionError("allocated="+allocated);
+              var next=manager.reload(root,!json);check(s.Entry.get("east",1)==row&&next!=s);try{manager.reload(root.resolve("missing"),json);throw new AssertionError();}catch(java.io.IOException expected){}check(manager.current()==next);
+              for(String bad:new String[]{"extra","missing","replaced"}){try{manager.reload(Path.of(args[0]+"-"+bad),json);throw new AssertionError("catalog accepted");}catch(IllegalArgumentException expected){check(expected.getMessage().contains("表集合"));}check(manager.current()==next);}
+              try{ConfigRuntime.parse("\"\\uD800\"");throw new AssertionError();}catch(IllegalArgumentException expected){}
+              System.out.println("通过：Java "+(json?"JSON":"Binary")+"，100000 次主键+分组查询分配 "+allocated+" B，引用及快照正确。");
+            }
+          }
+        }
+        """;
+    private const string GoCheck = """
+        package zrconfig
+        import("testing";"os";"strings")
+        var sink int32
+        func TestNative(t *testing.T){
+          root:=os.Getenv("ZRCONFIG_TEST_OUTPUT");manager:=&ConfigManager{}
+          for _,json:=range []bool{false,true}{
+            s,e:=manager.Reload(root,json);if e!=nil{t.Fatal(e)};r:=s.Entry().Get("east",1)
+            if s.Concrete().Get(1).Payload().Delay()!=7{t.Fatal("concrete inheritance")}
+            if r.Name()!="中文😀"||r.Signed()!=-9223372036854775808||r.Unsigned()!=18446744073709551615||r.Amount().String()!="79228162514264337593543950335"{t.Fatal("scalar")}
+            _,optional:=r.Optional().Value();_,element:=r.Values().At(0).Value();mapped,ok:=r.Mapping().Find(7)
+            if optional||element||!ok||mapped!="值"||r.Shape().Values().At(3)!=4||r.Lookup()!=s.Lookup().Get(10)||r.Lookup().Peer().Peer()!=r.Lookup(){t.Fatal("containers/reference")}
+            if _,ok:=r.Action().(*T_Demo_Damage);!ok||r.Quality()!=T_Demo_Quality_T_Max||r.Get_class()!="keyword"||s.Entry().GetById(1).Len()!=2||s.Entry().GetKey("中文😀").Len()!=2{t.Fatal("types/query")}
+            n:=testing.AllocsPerRun(100000,func(){sink=s.Entry().Get("east",1).Id()+int32(s.Entry().GetById(1).Len())});if n!=0{t.Fatalf("allocs=%v",n)}
+            next,e:=manager.Reload(root,!json);if e!=nil||s.Entry().Get("east",1)!=r||next==s{t.Fatal("snapshot")};_,e=manager.Reload(root+"/missing",json);if e==nil||manager.Current()!=next{t.Fatal("rollback")}
+            for _,bad:=range []string{"extra","missing","replaced"}{_,e=manager.Reload(root+"-"+bad,json);if e==nil||!strings.Contains(e.Error(),"表集合")||manager.Current()!=next{t.Fatal("catalog validation",e)}}
+            func(){defer func(){if recover()==nil{t.Fatal("surrogate")}}();parseJSON([]byte(`"\uD800"`))}()
+            t.Logf("通过：Go JSON=%v，主键+分组查询 0 allocs/op，引用及快照正确。",json)
+          }
+        }
+        """;
+    private const string LargeJavaBoundary = """
+        check(SelectedSnapshot.load(root,java.util.List.of("Forward000"),true).get_Forward256().get(1).getPeer().getId()==1);
+        var token=new Cancellation();
+        for(var mode:LoadMode.values()){
+            var plan=new LoadPlan(mode,mode==LoadMode.SelectedTables?java.util.List.of("Forward000"):null,true,java.util.List.of());
+            var snapshot=DataSnapshot.load(root,plan,token);var expected=mode==LoadMode.ServerDefault?257:mode==LoadMode.SelectedTables?2:0;
+            check(snapshot.loadedRowCount()==expected&&snapshot.completedTableCount()==expected);
+            var table=snapshot.get_Forward000();var row=table.load(1,token);check(row.load_Peer().load_Peer()==row);check(table.loadGroup_ById(1,token).size()==1);
+        }
+        var warmed=DataSnapshot.loadWithWarmup(root,new LoadPlan(LoadMode.LazyRowsOnAccess,null,true,java.util.List.of("Forward256")),java.util.List.of(DataSnapshot.warmupRow_Forward000(1),DataSnapshot.warmupGroup_Forward000_ById(1),DataSnapshot.warmupRow_ZrConfigSnapshotPart0(1,"owned-key"),DataSnapshot.warmupGroup_ZrConfigSnapshotPart0_ByTextAndId("owned-key",1)),token);
+        check(warmed.loadedRowCount()==3&&warmed.completedTableCount()==1);
+        """;
+
+    private const string LargeGoBoundary = """
+        ctx:=context.Background()
+        empty:=new(DataSnapshot);if empty.LoadedRowCount()!=0||empty.CompletedTableCount()!=0||empty.LoadAll(ctx)!=nil{t.Fatal("zero snapshot counts")};if _,err:=empty.Get_Forward000();err==nil{t.Fatal("zero snapshot selection")};if new(ConfigSnapshot).Forward000()!=nil{t.Fatal("zero legacy snapshot")}
+        selected,err:=LoadSelectedConfig(root,[]string{"Forward000"},true);if err!=nil{t.Fatal(err)}
+        target,err:=selected.Get_Forward256();if err!=nil||target.Get(1).Peer().Id()!=1{t.Fatal("selected reference",err)}
+        owned,err:=LoadServerConfig(root,true);if err!=nil||owned.Forward000().Get(1).serverOwner!=owned{t.Fatal("server ownership",err)}
+        for _,mode:=range []LoadMode{ServerDefault,SelectedTables,LazyRowsStrict,LazyRowsOnAccess}{
+            plan:=LoadPlan{Mode:mode,PreferJSON:true};expected:=0
+            if mode==ServerDefault{expected=257};if mode==SelectedTables{expected=2;plan.Tables=[]string{"Forward000"}}
+            snapshot,err:=LoadData(ctx,root,plan);if err!=nil{t.Fatal(err)}
+            if snapshot.LoadedRowCount()!=expected||snapshot.CompletedTableCount()!=expected{t.Fatal("counts",mode)}
+            table,err:=snapshot.Get_Forward000();if err!=nil{t.Fatal(err)};row,err:=table.Load(ctx,1);if err!=nil{t.Fatal(err)}
+            peer,err:=row.Load_Peer(ctx);if err!=nil{t.Fatal(err)};back,err:=peer.Load_Peer(ctx);if err!=nil||back!=row{t.Fatal("reference identity",err)}
+            group,err:=table.LoadGroup_ById(ctx,1);if err!=nil||group.Len()!=1{t.Fatal("group",err)}
+        }
+        plan:=LoadPlan{Mode:LazyRowsOnAccess,PreferJSON:true,WarmupTables:[]string{"Forward256"}}
+        snapshot,err:=LoadDataWithWarmup(ctx,root,plan,[]DataWarmup{WarmupRow_Forward000(1),WarmupGroup_Forward000_ById(1),WarmupRow_ZrConfigSnapshotPart0(1,"owned-key"),WarmupGroup_ZrConfigSnapshotPart0_ByTextAndId("owned-key",1)});if err!=nil{t.Fatal(err)}
+        if snapshot.LoadedRowCount()!=3||snapshot.CompletedTableCount()!=1{t.Fatal("warmup counts")}
+        """;
+
+    private const string LargeCppBoundary = """
+        using namespace zrconfig;using Snapshot=zrconfig::data::Snapshot;
+        Cancellation token;
+        for(auto mode:{LoadMode::ServerDefault,LoadMode::SelectedTables,LoadMode::LazyRowsStrict,LoadMode::LazyRowsOnAccess}){
+            LoadPlan plan;plan.mode=mode;plan.prefer_json=true;if(mode==LoadMode::SelectedTables)plan.tables=std::vector<std::string>{"Forward000"};
+            auto snapshot=Snapshot::load(root,plan,token);std::size_t expected=mode==LoadMode::ServerDefault?257:mode==LoadMode::SelectedTables?2:0;
+            assert(snapshot->loaded_row_count()==expected&&snapshot->completed_table_count()==expected);
+            auto row=snapshot->load_Forward000(1,token);assert(row.load_Peer(token)->load_Peer(token)->Id()==1);
+            assert(snapshot->load_group_Forward000_ById(1,token).size()==1);
+        }
+        LoadPlan lazy;lazy.mode=LoadMode::LazyRowsOnAccess;lazy.prefer_json=true;
+        std::string key="owned-key";
+        auto rowStep=Snapshot::warmup_row_ZrConfigSnapshotPart0(1,key);
+        auto groupStep=Snapshot::warmup_group_ZrConfigSnapshotPart0_ByText(key);
+        auto compositeStep=Snapshot::warmup_group_ZrConfigSnapshotPart0_ByTextAndId(key,1);
+        key.assign("changed-after-capture");
+        auto snapshot=Snapshot::load_with_warmup(root,lazy,{Snapshot::warmup_table_Forward256(),Snapshot::warmup_row_Forward000(1),Snapshot::warmup_group_Forward000_ById(1),rowStep,groupStep,compositeStep},token);
+        assert(snapshot->loaded_row_count()==3&&snapshot->completed_table_count()==1);
+        assert(snapshot->get_ZrConfigSnapshotPart0(1,"owned-key").Id()==1);
+        assert(snapshot->find_group_ZrConfigSnapshotPart0_ByText("owned-key").size()==1);
+        assert(snapshot->find_group_ZrConfigSnapshotPart0_ByTextAndId("owned-key",1).size()==1);
+        std::weak_ptr<const Snapshot> weak=snapshot;
+        {auto row=snapshot->get_Forward000(1);snapshot.reset();assert(!weak.expired());assert(row.get_Peer()->get_Peer()->Id()==1);}
+        assert(weak.expired());
+        """;
+
+    private const string CppCheck = """
+        #include "snapshot.hpp"
+        #include <iostream>
+        #include <cstdlib>
+        #include <new>
+        static std::atomic<std::size_t> allocations{0};static volatile std::int32_t sink;
+        void* operator new(std::size_t n){allocations.fetch_add(1,std::memory_order_relaxed);if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+        void operator delete(void* p)noexcept{std::free(p);}void* operator new[](std::size_t n){return ::operator new(n);}void operator delete[](void* p)noexcept{::operator delete(p);}
+        void check(bool v){if(!v)throw std::runtime_error("assertion failed");}
+        int main(int,char**argv){try{zrconfig::ConfigManager manager;std::filesystem::path root(argv[1]);
+          for(bool json:{false,true}){auto s=manager.reload(root,json);std::string key="east";const auto&r=s->Entry().get(key,1);
+            check(s->Concrete().get(1).Payload()->Delay()==7);
+            check(r.Name()=="中文😀"&&r.Signed()==std::numeric_limits<std::int64_t>::min()&&r.Unsigned()==std::numeric_limits<std::uint64_t>::max()&&r.Amount().string()=="79228162514264337593543950335");
+            check(!r.Optional()&&!r.Values()[0]&&r.Shape().values()[3]==4&&r.Mapping().at(7)=="值"&&r.Lookup()==s->Lookup().find(10)&&r.Lookup()->Peer()->Peer()==r.Lookup());
+            check(dynamic_cast<const zrconfig::T_Demo_Damage*>(r.Action().get())&&r.Quality()==zrconfig::T_Demo_Quality::T_Max&&r.class_()=="keyword"&&s->Entry().getById(1).size()==2&&s->Entry().getKey("中文😀").size()==2);
+            auto before=allocations.load();for(int i=0;i<100000;i++)sink=s->Entry().get(key,1).Id()+static_cast<std::int32_t>(s->Entry().getById(1).size());check(allocations.load()==before);
+            auto next=manager.reload(root,!json);check(&s->Entry().get(key,1)==&r&&next!=s);try{manager.reload(root/"missing",json);return 2;}catch(const std::exception&){}check(manager.current()==next);
+            for(const auto*bad:{"extra","missing","replaced"}){try{manager.reload(root.string()+"-"+bad,json);return 4;}catch(const std::exception&e){check(std::string(e.what()).find("表集合")!=std::string::npos);}check(manager.current()==next);}
+            try{zrconfig::parse_json("\"\\uD800\"");return 3;}catch(const std::exception&){}
+            std::cout<<"通过：C++ JSON="<<json<<"，100000 次主键+分组查询分配 0 次，引用及快照正确。"<<std::endl;
+          }
+        }catch(const std::exception&e){std::cerr<<e.what()<<std::endl;return 1;}return 0;}
+        """;
+}

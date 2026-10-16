@@ -1,0 +1,15 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net10.0</TargetFramework>
+        <OutputType>WinExe</OutputType>
+        <Version>1.4.0</Version>
+    </PropertyGroup>
+    <ItemGroup>
+        <None Update="Licenses/AvaloniaEdit.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+        <InternalsVisibleTo Include="ZrConfig.Tests" />
+        <ProjectReference Include="../ZrConfig.Core/ZrConfig.Core.csproj" />
+        <PackageReference Include="Avalonia.Desktop" Version="12.1.4" />
+        <PackageReference Include="Avalonia.AvaloniaEdit" Version="12.0.0" />
+        <PackageReference Include="Avalonia.Themes.Fluent" Version="12.1.4" />
+    </ItemGroup>
+</Project>

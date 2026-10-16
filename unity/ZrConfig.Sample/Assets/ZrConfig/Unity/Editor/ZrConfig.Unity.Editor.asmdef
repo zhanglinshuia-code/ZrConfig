@@ -1,0 +1,11 @@
+{
+    "name": "ZrConfig.Unity.Editor",
+    "references": [
+        "ZrConfig.Unity",
+        "ZrConfig.Runtime"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "autoReferenced": true
+}

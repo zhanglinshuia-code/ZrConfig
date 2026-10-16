@@ -1,0 +1,4 @@
+<linker>
+    <!-- 配置查看器通过反射展示属性；保留完整示例模型供桌面 IL2CPP 构建使用。 -->
+    <assembly fullname="ZrConfig.Models" preserve="all" />
+</linker>

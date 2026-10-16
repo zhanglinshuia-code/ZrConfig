@@ -1,0 +1,1880 @@
+// zrconfig-api-contract:1
+// 公共运行库仅依赖标准库；解析和分配发生在加载阶段，查询使用借用与预建索引。
+#![allow(dead_code)]
+use std::cell::Cell;
+use std::collections::hash_map::DefaultHasher;
+use std::collections::{BTreeMap, HashMap, HashSet};
+use std::hash::{Hash, Hasher};
+use std::path::{Path, PathBuf};
+use std::sync::Arc;
+pub type Result<T> = std::result::Result<T, String>;
+
+// The server family uses structured errors; the legacy String Result stays source compatible.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum ErrorCode {
+    NotInitialized, ManagerClosed, ReloadBusy, StaleCandidate, AlreadyCommitted,
+    ForeignCandidate, Cancelled, DeadlineExceeded, InvalidPlan, UnsupportedCapability,
+    SourceUnavailable, InvalidManifest, TableSetMismatch, IntegrityMismatch, SchemaMismatch,
+    InvalidValue, MissingReference, KeyNotFound, TableNotSelected, TableNotLoaded, RowNotLoaded, LimitExceeded,
+    VersionIdentityConflict, CatalogMismatch, InternalError, InvalidEncoding, ReadFailed, BudgetExceeded, UnsupportedFormat,
+}
+#[derive(Clone,Debug,Default)]
+#[non_exhaustive]
+pub struct ErrorContext { pub version_id:String,pub table:String,pub row_key:String,pub field_path:String,pub relative_path:String }
+#[derive(Clone, Debug)]
+#[non_exhaustive]
+pub struct ConfigError {
+    pub code: ErrorCode,
+    pub stage: &'static str,
+    pub operation_id: u64,
+    pub message: String,
+    pub context:ErrorContext,
+    pub cause:Option<Arc<ConfigError>>,
+    source_cause:Option<Arc<dyn std::error::Error+Send+Sync>>,
+}
+impl ConfigError {
+    pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
+        Self { code, stage: "", operation_id: 0, message: message.into(),context:ErrorContext::default(),cause:None,source_cause:None }
+    }
+    fn locate(mut self,stage:&'static str,version:&str,table:&str,key:&str,field:&str,path:&str)->Self {
+        if self.stage.is_empty(){self.stage=stage;}if self.context.version_id.is_empty(){self.context.version_id=version.into();}if self.context.table.is_empty(){self.context.table=table.into();}if self.context.row_key.is_empty(){self.context.row_key=key.into();}if self.context.field_path.is_empty(){self.context.field_path=field.into();}if self.context.relative_path.is_empty(){self.context.relative_path=path.into();}self
+    }
+
+}
+impl std::fmt::Display for ConfigError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{:?}: {}", self.code, self.message) }
+}
+impl std::error::Error for ConfigError { fn source(&self)->Option<&(dyn std::error::Error+'static)>{self.source_cause.as_deref().map(|e|e as &(dyn std::error::Error+'static)).or_else(||self.cause.as_deref().map(|e|e as &(dyn std::error::Error+'static)))} }
+pub type ServerResult<T> = std::result::Result<T, ConfigError>;
+// Immutable deployment policy. Builders reserve the stable public construction surface.
+#[derive(Clone,Debug)]
+pub struct ResourceLimits {
+    max_manifest_bytes:u64,
+    max_table_bytes:u64,
+    max_bundle_bytes:u64,
+    max_tables:usize,
+    max_rows:usize,
+    max_decoded_rows:usize,
+    max_container_elements:usize,
+    max_depth:usize,
+    max_string_bytes:usize,
+    max_concurrent_reads:usize,
+    max_concurrent_decodes:usize,
+    max_pending_requests:usize,
+    max_estimated_decoded_bytes:u64,
+    max_estimated_index_bytes:u64,
+}
+impl Default for ResourceLimits {fn default()->Self{Self{max_manifest_bytes:16<<20,max_table_bytes:512<<20,max_bundle_bytes:1<<30,max_tables:100_000,max_rows:5_000_000,max_decoded_rows:5_000_000,max_container_elements:1_000_000,max_depth:64,max_string_bytes:16<<20,max_concurrent_reads:1,max_concurrent_decodes:1,max_pending_requests:4096,max_estimated_decoded_bytes:2<<30,max_estimated_index_bytes:2<<30}}}
+impl ResourceLimits {pub fn builder()->ResourceLimitsBuilder{ResourceLimitsBuilder(Self::default())}
+    pub fn max_manifest_bytes(&self)->u64{self.max_manifest_bytes}
+    pub fn max_table_bytes(&self)->u64{self.max_table_bytes}
+    pub fn max_bundle_bytes(&self)->u64{self.max_bundle_bytes}
+    pub fn max_tables(&self)->usize{self.max_tables}
+    pub fn max_rows(&self)->usize{self.max_rows}
+    pub fn max_decoded_rows(&self)->usize{self.max_decoded_rows}
+    pub fn max_container_elements(&self)->usize{self.max_container_elements}
+    pub fn max_depth(&self)->usize{self.max_depth}
+    pub fn max_string_bytes(&self)->usize{self.max_string_bytes}
+    pub fn max_concurrent_reads(&self)->usize{self.max_concurrent_reads}
+    pub fn max_concurrent_decodes(&self)->usize{self.max_concurrent_decodes}
+    pub fn max_pending_requests(&self)->usize{self.max_pending_requests}
+    pub fn max_estimated_index_bytes(&self)->u64{self.max_estimated_index_bytes}
+    pub fn max_estimated_decoded_bytes(&self)->u64{self.max_estimated_decoded_bytes}
+}
+pub struct ResourceLimitsBuilder(ResourceLimits);
+impl ResourceLimitsBuilder{
+    pub fn max_manifest_bytes(mut self,value:u64)->Self{self.0.max_manifest_bytes=value;self}
+    pub fn max_table_bytes(mut self,value:u64)->Self{self.0.max_table_bytes=value;self}
+    pub fn max_bundle_bytes(mut self,value:u64)->Self{self.0.max_bundle_bytes=value;self}
+    pub fn max_tables(mut self,value:usize)->Self{self.0.max_tables=value;self}
+    pub fn max_rows(mut self,value:usize)->Self{self.0.max_rows=value;self}
+    pub fn max_decoded_rows(mut self,value:usize)->Self{self.0.max_decoded_rows=value;self}
+    pub fn max_container_elements(mut self,value:usize)->Self{self.0.max_container_elements=value;self}
+    pub fn max_depth(mut self,value:usize)->Self{self.0.max_depth=value;self}
+    pub fn max_string_bytes(mut self,value:usize)->Self{self.0.max_string_bytes=value;self}
+    pub fn max_concurrent_reads(mut self,value:usize)->Self{self.0.max_concurrent_reads=value;self}
+    pub fn max_concurrent_decodes(mut self,value:usize)->Self{self.0.max_concurrent_decodes=value;self}
+    pub fn max_pending_requests(mut self,value:usize)->Self{self.0.max_pending_requests=value;self}
+    pub fn max_estimated_index_bytes(mut self,value:u64)->Self{self.0.max_estimated_index_bytes=value;self}
+    pub fn max_estimated_decoded_bytes(mut self,value:u64)->Self{self.0.max_estimated_decoded_bytes=value;self}
+    pub fn build(self)->ServerResult<ResourceLimits>{let value=self.0;
+        if value.max_estimated_index_bytes==0||value.max_manifest_bytes==0||value.max_table_bytes==0||value.max_bundle_bytes==0||value.max_tables==0||value.max_rows==0||value.max_decoded_rows==0||value.max_container_elements==0||value.max_depth==0||value.max_string_bytes==0||value.max_concurrent_reads==0||value.max_concurrent_decodes==0||value.max_pending_requests==0||value.max_estimated_decoded_bytes==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Resource limits must be positive"));}
+        if value.max_rows>5_000_000||value.max_decoded_rows>5_000_000||value.max_container_elements>1_000_000||value.max_depth>64||value.max_string_bytes>16<<20{return Err(ConfigError::new(ErrorCode::UnsupportedCapability,"Limits exceed wire capabilities"));}Ok(value)
+    }
+}
+/// Source ownership remains with the caller. Returned Vec ownership transfers to runtime.
+/// Implementations must check cancellation between blocking reads; no implicit retries.
+pub trait ConfigSource {fn read(&self,relative_path:&str,maximum_bytes:u64,cancellation:&Cancellation)->ServerResult<Vec<u8>>;}
+pub struct MemoryConfigSource{files:HashMap<String,Vec<u8>>}
+impl MemoryConfigSource{pub fn new(files:HashMap<String,Vec<u8>>)->ServerResult<Self>{for name in files.keys(){source_path(name)?;}Ok(Self{files})}}
+impl ConfigSource for MemoryConfigSource{fn read(&self,name:&str,maximum:u64,cancellation:&Cancellation)->ServerResult<Vec<u8>>{
+    cancellation.check()?;source_path(name)?;if maximum==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Invalid byte limit"));}
+    let bytes=self.files.get(name).ok_or_else(||ConfigError::new(ErrorCode::SourceUnavailable,"Source file missing"))?;
+    if bytes.len()as u64>maximum{return Err(ConfigError::new(ErrorCode::LimitExceeded,"Source file exceeds limit"));}Ok(bytes.clone())
+}}
+pub struct FileConfigSource{root:PathBuf}
+impl FileConfigSource{
+    pub fn new(root:impl Into<PathBuf>)->Self{Self{root:root.into()}}
+    pub fn source_namespace(&self)->String{self.root.to_string_lossy().into_owned()}
+}
+fn source_path(name:&str)->ServerResult<()>{
+    if name.is_empty()||name.contains(['\\',':','\0'])||name.split('/').any(|part|part.is_empty()||part.starts_with('.')){return Err(ConfigError::new(ErrorCode::InvalidPlan,"Invalid relative source path"));}Ok(())
+}
+fn source_error(error:std::io::Error)->ConfigError{let mut result=ConfigError::new(if error.kind()==std::io::ErrorKind::NotFound{ErrorCode::SourceUnavailable}else{ErrorCode::ReadFailed},error.to_string());result.source_cause=Some(Arc::new(error));result}
+fn check_source_path(root:&Path,name:&str)->ServerResult<PathBuf>{
+    let info=std::fs::symlink_metadata(root).map_err(source_error)?;if !info.is_dir()||info.file_type().is_symlink(){return Err(ConfigError::new(ErrorCode::ReadFailed,"Source root must be a real directory"));}
+    // Canonicalize platform aliases above the explicitly chosen root. Descendants cannot be links.
+    let mut path=std::fs::canonicalize(root).map_err(source_error)?;for part in name.split('/'){
+        path.push(part);let info=std::fs::symlink_metadata(&path).map_err(source_error)?;if info.file_type().is_symlink(){return Err(ConfigError::new(ErrorCode::ReadFailed,"Symbolic links are not permitted"));}
+    }Ok(path)
+}
+impl ConfigSource for FileConfigSource{fn read(&self,name:&str,maximum:u64,cancellation:&Cancellation)->ServerResult<Vec<u8>>{
+    use std::io::Read;
+    cancellation.check()?;source_path(name)?;if maximum==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Invalid byte limit"));}
+    let path=check_source_path(&self.root,name)?;let mut file=std::fs::File::open(&path).map_err(source_error)?;let before=file.metadata().map_err(source_error)?;
+    if !before.is_file(){return Err(ConfigError::new(ErrorCode::ReadFailed,"Source is not a regular file"));}
+    if before.len()>maximum||before.len()>usize::MAX as u64{return Err(ConfigError::new(ErrorCode::LimitExceeded,"Source file exceeds limit"));}
+    let length=before.len()as usize;let mut bytes=Vec::new();bytes.try_reserve_exact(length).map_err(|e|ConfigError::new(ErrorCode::BudgetExceeded,e.to_string()))?;bytes.resize(length,0);let mut position=0;
+    while position<length{cancellation.check()?;let end=position+(length-position).min(1<<20);let read=file.read(&mut bytes[position..end]).map_err(source_error)?;if read==0{return Err(ConfigError::new(ErrorCode::ReadFailed,"Short source read"));}position+=read;}
+    cancellation.check()?;let mut extra=[0];if file.read(&mut extra).map_err(source_error)?!=0{return Err(ConfigError::new(ErrorCode::ReadFailed,"Source grew during reading"));}
+    let after=file.metadata().map_err(source_error)?;let published=std::fs::metadata(&path).map_err(source_error)?;
+    if before.len()!=after.len()||before.modified().ok()!=after.modified().ok()||after.len()!=published.len()||after.modified().ok()!=published.modified().ok()||check_source_path(&self.root,name)?!=path{return Err(ConfigError::new(ErrorCode::ReadFailed,"Source changed during reading"));}Ok(bytes)
+}}
+#[derive(Clone,Debug)]
+#[non_exhaustive]
+pub struct SnapshotDiagnostics{pub read_bytes:u64,pub retained_raw_bytes:u64,pub estimated_decoded_bytes:u64,pub estimated_index_bytes:u64,pub declared_rows:usize,pub decoded_rows:usize,pub active_decodes:usize,pub pending_jobs:usize,pub pending_waiters:usize,pub merged_requests:u64,pub faulted_rows:u64,pub faulted_indexes:u64}
+impl SnapshotDiagnostics{pub fn estimated_live_bytes(&self)->u64{self.retained_raw_bytes.saturating_add((self.declared_rows as u64).saturating_mul(64)).saturating_add(self.estimated_decoded_bytes).saturating_add(self.estimated_index_bytes)}pub fn health(&self)->&'static str{if self.faulted_rows==0&&self.faulted_indexes==0{"Healthy"}else{"Degraded"}}}
+#[derive(Default)]
+struct BudgetState{read:u64,raw:u64,estimated:u64,index_estimated:u64,rows:usize,decoded:usize,decodes:usize,jobs:usize,waiters:usize,merged:u64,faults:u64,index_faults:u64}
+pub(super) struct LoadBudget{limits:ResourceLimits,state:std::sync::Mutex<BudgetState>}
+impl LoadBudget{
+    fn new(limits:ResourceLimits)->Self{Self{limits,state:std::sync::Mutex::new(BudgetState::default())}}
+    fn state(&self)->ServerResult<std::sync::MutexGuard<'_,BudgetState>>{self.state.lock().map_err(|_|ConfigError::new(ErrorCode::InternalError,"Load budget lock poisoned"))}
+    pub(super) fn diagnostics(&self)->ServerResult<SnapshotDiagnostics>{let s=self.state()?;Ok(SnapshotDiagnostics{read_bytes:s.read,retained_raw_bytes:s.raw,estimated_decoded_bytes:s.estimated,estimated_index_bytes:s.index_estimated,declared_rows:s.rows,decoded_rows:s.decoded,active_decodes:s.decodes,pending_jobs:s.jobs,pending_waiters:s.waiters,merged_requests:s.merged,faulted_rows:s.faults,faulted_indexes:s.index_faults})}
+    fn limit()->ConfigError{ConfigError::new(ErrorCode::LimitExceeded,"Load budget exhausted")}
+    fn read(&self,count:usize)->ServerResult<()>{let mut state=self.state()?;if count as u64>self.limits.max_bundle_bytes-state.read{return Err(Self::limit());}state.read+=count as u64;Ok(())}
+    fn rows(&self,count:usize)->ServerResult<()>{let mut state=self.state()?;if count>self.limits.max_rows-state.rows{return Err(Self::limit());}state.rows+=count;Ok(())}
+    fn read_limit(&self)->ServerResult<u64>{let limit=self.limits.max_table_bytes.min(self.limits.max_bundle_bytes-self.state()?.read);if limit==0{Err(Self::limit())}else{Ok(limit)}}
+    fn request(self:&Arc<Self>,job:bool)->ServerResult<RequestPermit>{let mut state=self.state()?;if if job{state.jobs}else{state.waiters}>=self.limits.max_pending_requests{return Err(Self::limit());}if job{state.jobs+=1;}else{state.waiters+=1;state.merged=state.merged.saturating_add(1);}Ok(RequestPermit{budget:self.clone(),job})}
+    fn reserve_index(self:&Arc<Self>,bytes:u64)->ServerResult<IndexPermit>{let mut state=self.state()?;if bytes>self.limits.max_estimated_index_bytes-state.index_estimated{return Err(ConfigError::new(ErrorCode::BudgetExceeded,"Derived index budget exhausted"));}state.index_estimated+=bytes;Ok(IndexPermit{budget:self.clone(),bytes,committed:false})}
+    fn reserve(self:&Arc<Self>,bytes:u64)->ServerResult<DecodePermit>{self.reserve_decode(bytes,false)}
+    fn reserve_decode(self:&Arc<Self>,bytes:u64,transient:bool)->ServerResult<DecodePermit>{let mut state=self.state()?;if state.decodes>=self.limits.max_concurrent_decodes||(!transient&&state.decoded>=self.limits.max_decoded_rows)||bytes>self.limits.max_estimated_decoded_bytes-state.estimated{return Err(Self::limit());}state.decodes+=1;if !transient{state.decoded+=1;}state.estimated+=bytes;Ok(DecodePermit{budget:self.clone(),bytes,committed:false,transient})}
+}
+struct IndexPermit{budget:Arc<LoadBudget>,bytes:u64,committed:bool}
+impl IndexPermit{fn commit(&mut self,retained:u64)->ServerResult<()>{let mut state=self.budget.state()?;if retained>self.bytes&&retained-self.bytes>self.budget.limits.max_estimated_index_bytes-state.index_estimated{return Err(ConfigError::new(ErrorCode::BudgetExceeded,"Derived index budget exhausted"))}state.index_estimated=state.index_estimated-self.bytes+retained;self.bytes=retained;self.committed=true;Ok(())}}
+impl Drop for IndexPermit{fn drop(&mut self){if !self.committed{let mut state=self.budget.state.lock().unwrap_or_else(|e|e.into_inner());state.index_estimated-=self.bytes;}}}
+struct RequestPermit{budget:Arc<LoadBudget>,job:bool}
+impl Drop for RequestPermit{fn drop(&mut self){let mut state=self.budget.state.lock().unwrap_or_else(|e|e.into_inner());if self.job{state.jobs-=1;}else{state.waiters-=1;}}}
+struct DecodePermit{budget:Arc<LoadBudget>,bytes:u64,committed:bool,transient:bool}
+impl Drop for DecodePermit{fn drop(&mut self){let mut state=self.budget.state.lock().unwrap_or_else(|e|e.into_inner());state.decodes-=1;if !self.committed{if !self.transient{state.decoded-=1;}state.estimated-=self.bytes;}}}
+fn terminal_row_error(error:&ConfigError)->bool{matches!(error.code,ErrorCode::InvalidValue|ErrorCode::InvalidEncoding|ErrorCode::MissingReference|ErrorCode::SchemaMismatch|ErrorCode::IntegrityMismatch)}
+
+// The legacy parser keeps its String error ABI. A scoped, thread-local policy records
+// only our own parser limit/encoding failures; host callbacks never execute in this scope.
+thread_local! {static DECODE_POLICY:std::cell::RefCell<Option<ResourceLimits>>=const{std::cell::RefCell::new(None)};static DECODE_STAGE:Cell<&'static str>=const{Cell::new("")};static DECODE_CODE:Cell<Option<ErrorCode>>=const{Cell::new(None)};static DECODE_FIELD:std::cell::RefCell<String>=const{std::cell::RefCell::new(String::new())};}
+struct DecodeScope{policy:Option<ResourceLimits>,code:Option<ErrorCode>,field:String,stage:&'static str}
+impl Drop for DecodeScope{fn drop(&mut self){DECODE_STAGE.with(|s|s.set(self.stage));DECODE_POLICY.with(|p|*p.borrow_mut()=self.policy.take());DECODE_CODE.with(|c|c.set(self.code));DECODE_FIELD.with(|f|*f.borrow_mut()=std::mem::take(&mut self.field));}}
+fn limited_decode<T>(limits:&ResourceLimits,decode:impl FnOnce()->Result<T>)->ServerResult<T>{
+    let _scope=DecodeScope{stage:DECODE_STAGE.with(|s|s.replace("")),policy:DECODE_POLICY.with(|p|p.replace(Some(limits.clone()))),code:DECODE_CODE.with(|c|c.replace(None)),field:DECODE_FIELD.with(|f|f.replace(String::new()))};
+    decode().map_err(|message|{let mut error=ConfigError::new(DECODE_CODE.with(Cell::get).unwrap_or(ErrorCode::InvalidValue),message);error.stage=DECODE_STAGE.with(Cell::get);error.context.field_path=DECODE_FIELD.with(|f|f.borrow().clone());error})
+}
+fn field_failure(error:String,prefix:&str)->String{DECODE_POLICY.with(|policy|{if policy.borrow().is_some(){DECODE_FIELD.with(|path|{let mut path=path.borrow_mut();let separator=if path.is_empty()||path.starts_with('['){""}else{"."};*path=format!("{}{}{}",prefix,separator,*path);});}});error}
+fn decode_limit<T>(message:&str)->Result<T>{DECODE_CODE.with(|c|c.set(Some(ErrorCode::LimitExceeded)));invalid(message)}
+fn decode_elements()->usize{DECODE_POLICY.with(|p|p.borrow().as_ref().map_or(8_000_000,|p|p.max_container_elements))}
+fn decode_depth()->usize{DECODE_POLICY.with(|p|p.borrow().as_ref().map_or(64,|p|p.max_depth))}
+fn decode_string_limit()->usize{DECODE_POLICY.with(|p|p.borrow().as_ref().map_or(16<<20,|p|p.max_string_bytes))}
+fn decode_utf8(error:std::str::Utf8Error)->String{DECODE_CODE.with(|c|c.set(Some(ErrorCode::InvalidEncoding)));error.to_string()}
+
+pub struct TableDescriptor { name: String, schema_hash: String, dependencies: Vec<String>, component: usize }
+impl TableDescriptor {
+    pub fn name(&self) -> &str { &self.name }
+    pub fn schema_hash(&self) -> &str { &self.schema_hash }
+    pub fn dependencies(&self) -> &[String] { &self.dependencies }
+    pub fn component(&self) -> usize { self.component }
+}
+pub struct SelectionPlan { requested: Vec<String>, tables: Vec<String>, catalog_fingerprint: String }
+impl SelectionPlan {
+    pub fn requested(&self) -> &[String] { &self.requested }
+    pub fn tables(&self) -> &[String] { &self.tables }
+    pub fn catalog_fingerprint(&self) -> &str { &self.catalog_fingerprint }
+}
+pub struct Catalog { fingerprint: String,target:String, tables: Vec<TableDescriptor>, names: HashMap<String,usize>, components: HashMap<usize,Vec<usize>> }
+impl Catalog {
+    pub fn parse(source: &str) -> ServerResult<Self> {
+        let definition=parse_json(source).map_err(|e|ConfigError::new(ErrorCode::InvalidPlan,e))?;
+        let format=definition.field("format").and_then(scalar::<u32>).map_err(|e|ConfigError::new(ErrorCode::InvalidPlan,e))?;
+        if format!=1&&format!=2{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Unknown catalog format"))}
+        if format==2{let supported=["binary-v4", "json-v1", "server-default", "selected-closure", "lazy-strict", "lazy-on-access", "fixed-source-bytes", "snapshot-owned-handles", "explicit-reference-load", "row-cache", "group-cache", "typed-warmup", "bounded-source", "structured-errors", "manager-lifecycle"];let required=definition.field("requiredCapabilities").and_then(Json::array).map_err(|e|ConfigError::new(ErrorCode::InvalidPlan,e))?;if definition.field("runtimeContract").and_then(Json::string).ok()!=Some("server-v1"){return Err(ConfigError::new(ErrorCode::UnsupportedCapability,"Unsupported runtime contract"))}for value in required{let name=value.string().map_err(|e|ConfigError::new(ErrorCode::InvalidPlan,e))?;if !supported.contains(&name){return Err(ConfigError::new(ErrorCode::UnsupportedCapability,format!("Unsupported runtime capability: {}",name)))}}}
+        let parse = || -> Result<Self> {
+            let mut catalog = Self { target:definition.field("target").and_then(Json::string).unwrap_or("").to_owned(),fingerprint: definition.field("fingerprint")?.string()?.to_owned(), tables: Vec::new(), names: HashMap::new(), components: HashMap::new() };
+            for value in definition.field("tables")?.array()? {
+                let table = TableDescriptor { name: value.field("name")?.string()?.to_owned(), schema_hash: value.field("schemaHash")?.string()?.to_owned(),
+                    component: scalar::<u32>(value.field("component")?)? as usize, dependencies: value.field("dependencies")?.array()?.iter().map(|v|v.string().map(str::to_owned)).collect::<Result<Vec<_>>>()? };
+                let ordinal = catalog.tables.len();
+                if catalog.names.insert(table.name.clone(), ordinal).is_some() { return invalid("Duplicate catalog table"); }
+                catalog.components.entry(table.component).or_default().push(ordinal); catalog.tables.push(table);
+            }
+            for table in &catalog.tables { for name in &table.dependencies { if !catalog.names.contains_key(name) { return invalid("Unknown catalog dependency"); } } }
+            Ok(catalog)
+        };
+        parse().map_err(|message|ConfigError::new(ErrorCode::InvalidPlan,message))
+    }
+    pub fn fingerprint(&self) -> &str { &self.fingerprint }
+    pub fn tables(&self) -> &[TableDescriptor] { &self.tables }
+    pub fn select(&self, requested: &[&str]) -> ServerResult<SelectionPlan> {
+        let mut queue = requested.iter().map(|s|s.to_string()).collect::<Vec<_>>();
+        let mut components = HashSet::new(); let mut selected = HashSet::new(); let mut index = 0;
+        while index < queue.len() {
+            let name = &queue[index]; index += 1;
+            let ordinal = *self.names.get(name).ok_or_else(||ConfigError::new(ErrorCode::InvalidPlan,format!("Unknown selected table: {name}")))?;
+            let component = self.tables[ordinal].component;
+            if !components.insert(component) { continue; }
+            for member in &self.components[&component] { selected.insert(*member); queue.extend(self.tables[*member].dependencies.iter().cloned()); }
+        }
+        let mut input = requested.iter().map(|s|s.to_string()).collect::<Vec<_>>(); input.sort();
+        Ok(SelectionPlan { requested: input, tables: self.tables.iter().enumerate().filter(|(i,_)|selected.contains(i)).map(|(_,t)|t.name.clone()).collect(), catalog_fingerprint: self.fingerprint.clone() })
+    }
+}
+#[derive(Clone,Default)]
+pub struct Cancellation(Arc<CancellationState>);
+#[derive(Default)]
+struct CancellationState{cancelled:std::sync::atomic::AtomicBool,parent:Option<Arc<CancellationState>>,deadline:Option<std::time::Instant>}
+impl Cancellation{
+    pub fn new()->Self{Self::default()}
+    pub fn cancel(&self){self.0.cancelled.store(true,std::sync::atomic::Ordering::Release);}
+    pub fn is_cancelled(&self)->bool{let mut current=Some(&self.0);while let Some(state)=current{if state.cancelled.load(std::sync::atomic::Ordering::Acquire){return true;}current=state.parent.as_ref();}false}
+    pub fn check(&self)->ServerResult<()>{
+        if self.is_cancelled(){return Err(ConfigError::new(ErrorCode::Cancelled,"Operation cancelled"));}
+        let now=std::time::Instant::now();let mut current=Some(&self.0);while let Some(state)=current{if state.deadline.map_or(false,|deadline|now>=deadline){return Err(ConfigError::new(ErrorCode::DeadlineExceeded,"Operation deadline exceeded"));}current=state.parent.as_ref();}Ok(())
+    }
+    fn child(&self,deadline:std::time::Instant)->Self{Self(Arc::new(CancellationState{cancelled:std::sync::atomic::AtomicBool::new(false),parent:Some(self.0.clone()),deadline:Some(deadline)}))}
+}
+#[derive(Clone,Copy)]
+pub struct PreparationOptions{pub timeout:std::time::Duration,pub candidate_lifetime:std::time::Duration}
+impl Default for PreparationOptions{fn default()->Self{Self{timeout:std::time::Duration::from_secs(300),candidate_lifetime:std::time::Duration::from_secs(300)}}}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum ManagerPhase{Empty,Ready,Closed}
+#[derive(Clone,Copy,Debug)]
+#[non_exhaustive]
+pub struct ManagerStatus{pub phase:ManagerPhase,pub generation:u64,pub preparing_operation:Option<u64>}
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct SnapshotIdentity{source_namespace:String,version_id:String,manifest_digest:String}
+impl SnapshotIdentity{
+    pub fn new(source_namespace:impl Into<String>,version_id:impl Into<String>,manifest_digest:impl Into<String>)->ServerResult<Self>{
+        let value=Self{source_namespace:source_namespace.into(),version_id:version_id.into(),manifest_digest:manifest_digest.into()};
+        if value.version_id.is_empty()||value.manifest_digest.is_empty(){return Err(ConfigError::new(ErrorCode::InvalidPlan,"Version identity is incomplete"));}Ok(value)
+    }
+    pub fn source_namespace(&self)->&str{&self.source_namespace}
+    pub fn version_id(&self)->&str{&self.version_id}
+    pub fn manifest_digest(&self)->&str{&self.manifest_digest}
+}
+type IdentityResolver<S>=Arc<dyn Fn(&S)->ServerResult<SnapshotIdentity>+Send+Sync>;
+type LiveEstimator<S>=Arc<dyn Fn(&S)->ServerResult<u64>+Send+Sync>;
+type SnapshotValidator<S>=Arc<dyn Fn(&S,&Cancellation)->ServerResult<()>+Send+Sync>;
+pub struct ManagerPolicy<S>{identity:Option<IdentityResolver<S>>,validators:Vec<SnapshotValidator<S>>,event_capacity:usize,max_identities:usize,max_preparations:usize,live_budget:Option<(u64,LiveEstimator<S>)>,live_capacity:usize}
+impl<S> Default for ManagerPolicy<S>{fn default()->Self{Self{identity:None,validators:Vec::new(),event_capacity:64,max_identities:32,max_preparations:64,live_budget:None,live_capacity:1024}}}
+impl<S> ManagerPolicy<S>{
+    pub fn new()->Self{Self::default()}
+    pub fn with_identity<F>(mut self,resolver:F)->Self where F:Fn(&S)->ServerResult<SnapshotIdentity>+Send+Sync+'static{self.identity=Some(Arc::new(resolver));self}
+    pub fn with_validator<F>(mut self,validator:F)->Self where F:Fn(&S,&Cancellation)->ServerResult<()>+Send+Sync+'static{self.validators.push(Arc::new(validator));self}
+    pub fn with_event_capacity(mut self,value:usize)->ServerResult<Self>{if value==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Event capacity must be positive"));}self.event_capacity=value;Ok(self)}
+    pub fn with_identity_capacity(mut self,value:usize)->ServerResult<Self>{if value==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Identity capacity must be positive"));}self.max_identities=value;Ok(self)}
+    pub fn with_preparation_capacity(mut self,value:usize)->ServerResult<Self>{if value==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Preparation capacity must be positive"));}self.max_preparations=value;Ok(self)}
+    /// Admission estimate only. The estimator runs outside the manager lock and must include retained raw data, indexes and decoded caches.
+    pub fn with_estimated_live_budget<F>(mut self,maximum:u64,estimate:F)->ServerResult<Self> where F:Fn(&S)->ServerResult<u64>+Send+Sync+'static{if maximum==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Live budget must be positive"));}self.live_budget=Some((maximum,Arc::new(estimate)));Ok(self)}
+    pub fn with_live_tracking_capacity(mut self,value:usize)->ServerResult<Self>{if value==0{return Err(ConfigError::new(ErrorCode::InvalidPlan,"Live tracking capacity must be positive"));}self.live_capacity=value;Ok(self)}
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+#[non_exhaustive]
+pub enum ManagerEventKind{Committed,Cleared,Closed,PreparationFailed}
+#[derive(Clone,Debug)]
+#[non_exhaustive]
+pub struct ManagerEvent{pub kind:ManagerEventKind,pub generation:u64,pub operation_id:u64,pub identity:Option<SnapshotIdentity>,pub error:Option<ErrorCode>}
+#[derive(Clone,Copy,Debug)]
+#[non_exhaustive]
+pub struct ManagerDiagnostics{pub pending_events:usize,pub dropped_events:u64,pub callback_failures:u64,pub active_preparations:usize,pub retained_identities:usize,pub subscribers:usize}
+type EventListener=Arc<dyn Fn(&ManagerEvent)+Send+Sync>;
+struct EventState{queue:std::collections::VecDeque<ManagerEvent>,listeners:BTreeMap<u64,EventListener>,serial:u64,draining:bool,dropped:u64,failures:u64}
+/// Monotonic elapsed milliseconds, including waits but excluding callbacks. Operation zero means no sample.
+#[derive(Clone,Copy,Debug)]
+#[non_exhaustive]
+pub struct StageTiming{pub stage:&'static str,pub operation_id:u64,pub elapsed_milliseconds:f64,pub succeeded:bool}
+struct ServerState<S>{timings:[StageTiming;2],phase:ManagerPhase,generation:u64,serial:u64,pending:Option<u64>,building:bool,expires:std::time::Instant,current:Option<Arc<S>>,identities:std::collections::VecDeque<SnapshotIdentity>,active:usize,cancellation:Option<Cancellation>,live:Vec<std::sync::Weak<S>>}
+pub struct ServerManager<S>{state:Arc<std::sync::Mutex<ServerState<S>>>,policy:ManagerPolicy<S>,events:std::sync::Mutex<EventState>}
+pub struct PreparedSnapshot<S>{owner:std::sync::Weak<std::sync::Mutex<ServerState<S>>>,snapshot:Option<Arc<S>>,generation:u64,operation:u64,expires:std::time::Instant,committed:bool,identity:Option<SnapshotIdentity>}
+impl<S> PreparedSnapshot<S>{
+    pub fn snapshot(&self)->Option<&Arc<S>>{self.snapshot.as_ref()}
+    pub fn discard(&mut self){if let Some(owner)=self.owner.upgrade(){if let Ok(mut state)=owner.lock(){if !self.committed&&state.pending==Some(self.operation){state.pending=None;if let Some(token)=state.cancellation.take(){token.cancel();}}};}self.snapshot=None;}
+}
+impl<S> Drop for PreparedSnapshot<S>{fn drop(&mut self){self.discard();}}
+struct PreparationGuard<S>(Arc<std::sync::Mutex<ServerState<S>>>);
+impl<S> Drop for PreparationGuard<S>{fn drop(&mut self){self.0.lock().unwrap_or_else(|e|e.into_inner()).active-=1;}}
+pub struct CommitResult<S>{pub snapshot:Arc<S>,pub generation:u64,pub operation_id:u64,pub committed:bool}
+impl<S> Default for ServerManager<S>{fn default()->Self{Self::new()}}
+impl<S> ServerManager<S>{
+    pub fn new()->Self{Self::with_policy(ManagerPolicy::default())}
+    pub fn with_policy(policy:ManagerPolicy<S>)->Self{Self{state:Arc::new(std::sync::Mutex::new(ServerState{timings:[StageTiming{stage:"Prepare",operation_id:0,elapsed_milliseconds:0.0,succeeded:false},StageTiming{stage:"Commit",operation_id:0,elapsed_milliseconds:0.0,succeeded:false}],phase:ManagerPhase::Empty,generation:0,serial:0,pending:None,building:false,expires:std::time::Instant::now(),current:None,identities:std::collections::VecDeque::new(),active:0,cancellation:None,live:Vec::new()})),policy,events:std::sync::Mutex::new(EventState{queue:std::collections::VecDeque::new(),listeners:BTreeMap::new(),serial:0,draining:false,dropped:0,failures:0})}}
+    fn lock(&self)->ServerResult<std::sync::MutexGuard<'_,ServerState<S>>>{self.state.lock().map_err(|_|ConfigError::new(ErrorCode::InternalError,"Manager lock poisoned"))}
+    fn live_usage(&self,candidate:Option<&Arc<S>>,enforce:bool)->ServerResult<Option<u64>>{
+        let (maximum,estimate)=match &self.policy.live_budget{Some(value)=>value,None=>return Ok(None)};
+        let weak={let mut state=self.lock()?;state.live.retain(|item|item.strong_count()>0);state.live.clone()};
+        // Upgrade and release strong references outside the publication lock: the final drop can execute host code.
+        let mut owners:Vec<_>=weak.into_iter().filter_map(|item|item.upgrade()).collect();
+        if let Some(candidate)=candidate{if !owners.iter().any(|item|Arc::ptr_eq(item,candidate)){owners.push(candidate.clone());}}
+        let mut total=0u64;for item in &owners{total=total.saturating_add(estimate(item)?);if enforce&&total>*maximum{return Err(ConfigError::new(ErrorCode::BudgetExceeded,"Estimated live snapshot budget exhausted"));}}Ok(Some(total))
+    }
+    fn track_live(&self,state:&mut ServerState<S>,candidate:&Arc<S>)->ServerResult<()>{
+        if self.policy.live_budget.is_none(){return Ok(());}state.live.retain(|item|item.strong_count()>0);
+        let weak=Arc::downgrade(candidate);if state.live.iter().any(|item|item.ptr_eq(&weak)){return Ok(());}
+        if state.live.len()>=self.policy.live_capacity{return Err(ConfigError::new(ErrorCode::BudgetExceeded,"Live snapshot tracking capacity exhausted"));}state.live.push(weak);Ok(())
+    }
+    pub fn estimated_live_bytes(&self)->ServerResult<Option<u64>>{self.live_usage(None,false)}
+    pub fn try_acquire_snapshot(&self)->ServerResult<Option<Arc<S>>>{let state=self.lock()?;if state.phase==ManagerPhase::Closed{return Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"));}Ok(state.current.clone())}
+    pub fn acquire_snapshot(&self)->ServerResult<Arc<S>>{self.try_acquire_snapshot()?.ok_or_else(||ConfigError::new(ErrorCode::NotInitialized,"Configuration not loaded"))}
+    pub fn status(&self)->ServerResult<ManagerStatus>{let state=self.lock()?;Ok(ManagerStatus{phase:state.phase,generation:state.generation,preparing_operation:state.pending})}
+    pub fn stage_timings(&self)->ServerResult<[StageTiming;2]>{Ok(self.lock()?.timings)}
+    pub fn diagnostics(&self)->ServerResult<ManagerDiagnostics>{let state=self.lock()?;let events=self.events.lock().map_err(|_|ConfigError::new(ErrorCode::InternalError,"Event lock poisoned"))?;Ok(ManagerDiagnostics{pending_events:events.queue.len(),dropped_events:events.dropped,callback_failures:events.failures,active_preparations:state.active,retained_identities:state.identities.len(),subscribers:events.listeners.len()})}
+    pub fn subscribe<F>(&self,listener:F)->ServerResult<u64> where F:Fn(&ManagerEvent)+Send+Sync+'static{
+        let mut events=self.events.lock().map_err(|_|ConfigError::new(ErrorCode::InternalError,"Event lock poisoned"))?;events.serial=events.serial.checked_add(1).ok_or_else(||ConfigError::new(ErrorCode::LimitExceeded,"Listener identifiers exhausted"))?;let id=events.serial;events.listeners.insert(id,Arc::new(listener));Ok(id)
+    }
+    pub fn unsubscribe(&self,id:u64)->ServerResult<bool>{let listener=self.events.lock().map_err(|_|ConfigError::new(ErrorCode::InternalError,"Event lock poisoned"))?.listeners.remove(&id);Ok(listener.is_some())}
+    // Caller holds the publication gate. No callback or snapshot reference enters this queue.
+    fn enqueue(&self,event:ManagerEvent){let mut events=self.events.lock().unwrap_or_else(|e|e.into_inner());if events.listeners.is_empty(){return;}if events.queue.len()>=self.policy.event_capacity{events.queue.pop_front();events.dropped=events.dropped.saturating_add(1);}events.queue.push_back(event);}
+    fn drain(&self){
+        {let mut events=self.events.lock().unwrap_or_else(|e|e.into_inner());if events.draining{return;}events.draining=true;}
+        loop{let next={let mut events=self.events.lock().unwrap_or_else(|e|e.into_inner());match events.queue.pop_front(){Some(event)=>Some((event,events.listeners.values().cloned().collect::<Vec<_>>())),None=>{events.draining=false;None}}};
+            let(event,listeners)=match next{Some(next)=>next,None=>return};for listener in listeners{if std::panic::catch_unwind(std::panic::AssertUnwindSafe(||listener(&event))).is_err(){let mut events=self.events.lock().unwrap_or_else(|e|e.into_inner());events.failures=events.failures.saturating_add(1);}}
+        }
+    }
+    fn check_identity(state:&ServerState<S>,identity:Option<&SnapshotIdentity>)->ServerResult<()>{if let Some(identity)=identity{if state.identities.iter().any(|old|old.source_namespace==identity.source_namespace&&old.version_id==identity.version_id&&old.manifest_digest!=identity.manifest_digest){return Err(ConfigError::new(ErrorCode::VersionIdentityConflict,"Version reused with different manifest bytes"));}}Ok(())}
+    fn check_preparation(state:&ServerState<S>,generation:u64,operation:u64)->ServerResult<()>{if state.phase==ManagerPhase::Closed{return Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"));}if state.generation!=generation||state.pending!=Some(operation){return Err(ConfigError::new(ErrorCode::StaleCandidate,"Preparation became stale"));}Ok(())}
+    // Hosts schedule this blocking operation explicitly on their executor. No async runtime dependency.
+    pub fn prepare<F>(&self,factory:F,cancellation:&Cancellation,options:PreparationOptions)->ServerResult<PreparedSnapshot<S>> where F:FnOnce()->ServerResult<Arc<S>>{self.prepare_with_cancellation(|_|factory(),cancellation,options)}
+    pub fn prepare_with_cancellation<F>(&self,factory:F,cancellation:&Cancellation,options:PreparationOptions)->ServerResult<PreparedSnapshot<S>> where F:FnOnce(&Cancellation)->ServerResult<Arc<S>>{
+        cancellation.check()?;let now=std::time::Instant::now();if options.timeout.is_zero()||options.candidate_lifetime.is_zero(){return Err(ConfigError::new(ErrorCode::InvalidPlan,"Preparation deadlines must be positive"));}
+        let deadline=now.checked_add(options.timeout).ok_or_else(||ConfigError::new(ErrorCode::InvalidPlan,"Preparation deadline overflow"))?;let token=cancellation.child(deadline);
+        let(generation,operation)={let mut state=self.lock()?;if state.phase==ManagerPhase::Closed{return Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"));}if state.pending.is_some()&&(state.building||now<state.expires){return Err(ConfigError::new(ErrorCode::ReloadBusy,"Preparation already in progress"));}if state.active>=self.policy.max_preparations{return Err(ConfigError::new(ErrorCode::LimitExceeded,"Preparation capacity exhausted"));}
+            state.serial=state.serial.checked_add(1).ok_or_else(||ConfigError::new(ErrorCode::LimitExceeded,"Operation identifiers exhausted"))?;state.pending=Some(state.serial);state.building=true;state.expires=deadline;state.active+=1;state.cancellation=Some(token.clone());(state.generation,state.serial)};
+        let active=PreparationGuard(self.state.clone());let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(||->ServerResult<PreparedSnapshot<S>>{let mut prepared=PreparedSnapshot{owner:Arc::downgrade(&self.state),snapshot:None,generation,operation,expires:deadline,committed:false,identity:None};
+        self.live_usage(None,true)?;let next=factory(&token)?;{let state=self.lock()?;Self::check_preparation(&state,generation,operation)?;}token.check()?;
+        for validator in &self.policy.validators{validator(&next,&token)?;{let state=self.lock()?;Self::check_preparation(&state,generation,operation)?;}token.check()?;}
+        let identity=match &self.policy.identity{Some(resolve)=>Some(resolve(&next)?),None=>None};token.check()?;
+        let expires=std::time::Instant::now().checked_add(options.candidate_lifetime).ok_or_else(||ConfigError::new(ErrorCode::InvalidPlan,"Candidate deadline overflow"))?;
+        self.live_usage(Some(&next),true)?;
+        {let mut state=self.lock()?;Self::check_preparation(&state,generation,operation)?;Self::check_identity(&state,identity.as_ref())?;self.track_live(&mut state,&next)?;state.building=false;state.expires=expires;state.cancellation=None;}
+        prepared.snapshot=Some(next);prepared.expires=expires;prepared.identity=identity;Ok(prepared)
+        }));drop(active);
+        {let mut state=self.state.lock().unwrap_or_else(|e|e.into_inner());if operation>=state.timings[0].operation_id{state.timings[0]=StageTiming{stage:"Prepare",operation_id:operation,elapsed_milliseconds:now.elapsed().as_secs_f64()*1000.0,succeeded:matches!(&result,Ok(Ok(_)))};}}
+        match result{Ok(Ok(prepared))=>Ok(prepared),Ok(Err(error))=>{self.preparation_failed(generation,operation,error.code);Err(error)},Err(panic)=>{self.preparation_failed(generation,operation,ErrorCode::InternalError);std::panic::resume_unwind(panic)}}
+    }
+    fn preparation_failed(&self,generation:u64,operation:u64,error:ErrorCode){
+        {let mut state=self.state.lock().unwrap_or_else(|e|e.into_inner());if state.pending==Some(operation){state.pending=None;state.building=false;state.cancellation=None;}self.enqueue(ManagerEvent{kind:ManagerEventKind::PreparationFailed,generation,operation_id:operation,identity:None,error:Some(error)});}
+        self.drain();
+    }
+    pub fn commit(&self,prepared:&mut PreparedSnapshot<S>,cancellation:&Cancellation)->ServerResult<CommitResult<S>>{
+        let started=std::time::Instant::now();
+        if !prepared.owner.ptr_eq(&Arc::downgrade(&self.state)){return Err(ConfigError::new(ErrorCode::ForeignCandidate,"Candidate belongs to another manager"));}
+        {let state=self.lock()?;if state.phase==ManagerPhase::Closed{return Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"));}if prepared.committed{return Err(ConfigError::new(ErrorCode::AlreadyCommitted,"Candidate already committed"));}Self::check_preparation(&state,prepared.generation,prepared.operation)?;}cancellation.check()?;
+        self.live_usage(prepared.snapshot.as_ref(),true)?;
+        let(previous,result)={let mut state=self.lock()?;if state.phase==ManagerPhase::Closed{return Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"));}if prepared.committed{return Err(ConfigError::new(ErrorCode::AlreadyCommitted,"Candidate already committed"));}Self::check_preparation(&state,prepared.generation,prepared.operation)?;cancellation.check()?;
+            if std::time::Instant::now()>=prepared.expires{return Err(ConfigError::new(ErrorCode::DeadlineExceeded,"Candidate expired"));}Self::check_identity(&state,prepared.identity.as_ref())?;
+            let next=prepared.snapshot.as_ref().ok_or_else(||ConfigError::new(ErrorCode::StaleCandidate,"Candidate discarded"))?.clone();let generation=state.generation.checked_add(1).ok_or_else(||ConfigError::new(ErrorCode::LimitExceeded,"Generation exhausted"))?;
+            if let Some(identity)=&prepared.identity{if let Some(index)=state.identities.iter().position(|old|old.source_namespace==identity.source_namespace&&old.version_id==identity.version_id){state.identities.remove(index);}while state.identities.len()>=self.policy.max_identities{state.identities.pop_front();}state.identities.push_back(identity.clone());}
+            let previous=state.current.replace(next.clone());state.generation=generation;state.phase=ManagerPhase::Ready;state.pending=None;prepared.committed=true;
+            state.timings[1]=StageTiming{stage:"Commit",operation_id:prepared.operation,elapsed_milliseconds:started.elapsed().as_secs_f64()*1000.0,succeeded:true};self.enqueue(ManagerEvent{kind:ManagerEventKind::Committed,generation,operation_id:prepared.operation,identity:prepared.identity.clone(),error:None});(previous,CommitResult{snapshot:next,generation,operation_id:prepared.operation,committed:true})};
+        drop(previous);self.drain();Ok(result)
+    }
+    pub fn reload<F>(&self,factory:F,cancellation:&Cancellation,options:PreparationOptions)->ServerResult<CommitResult<S>> where F:FnOnce()->ServerResult<Arc<S>>{let mut prepared=self.prepare(factory,cancellation,options)?;self.commit(&mut prepared,cancellation)}
+    pub fn clear(&self)->ServerResult<()>{self.detach(false)}
+    pub fn close(&self)->ServerResult<()>{self.detach(true)}
+    fn detach(&self,close:bool)->ServerResult<()>{let previous={let mut state=self.lock()?;if state.phase==ManagerPhase::Closed{return if close{Ok(())}else{Err(ConfigError::new(ErrorCode::ManagerClosed,"Manager closed"))};}
+        state.generation=state.generation.checked_add(1).ok_or_else(||ConfigError::new(ErrorCode::LimitExceeded,"Generation exhausted"))?;state.phase=if close{ManagerPhase::Closed}else{ManagerPhase::Empty};state.pending=None;if let Some(token)=state.cancellation.take(){token.cancel();}
+        self.enqueue(ManagerEvent{kind:if close{ManagerEventKind::Closed}else{ManagerEventKind::Cleared},generation:state.generation,operation_id:0,identity:None,error:None});state.current.take()};drop(previous);self.drain();Ok(())}
+}
+
+// Both Arcs refer to the same already decoded storage used by the compatibility API.
+// Storage has no owning edge back to this handle, so reference cycles remain collectable.
+pub struct RowHandle<S, T> { pub(super) snapshot: Arc<S>, pub(super) row: Arc<T> }
+impl<S, T> Clone for RowHandle<S, T> {
+    fn clone(&self) -> Self { Self { snapshot: self.snapshot.clone(), row: self.row.clone() } }
+}
+impl<S, T> RowHandle<S, T> {
+    pub fn borrow(&self) -> &T { &self.row }
+    pub fn snapshot(&self) -> &Arc<S> { &self.snapshot }
+}
+pub struct GroupHandle<S, T> {
+    pub(super) snapshot: Arc<S>,
+    pub(super) rows: fn(&S) -> &[Arc<T>],
+    pub(super) positions: fn(&S, Option<usize>) -> &[usize],
+    pub(super) slot: Option<usize>,
+}
+impl<S, T> Clone for GroupHandle<S, T> {
+    fn clone(&self) -> Self { Self { snapshot: self.snapshot.clone(), rows: self.rows, positions: self.positions, slot: self.slot } }
+}
+impl<S, T> GroupHandle<S, T> {
+    pub fn len(&self) -> usize { (self.positions)(&self.snapshot, self.slot).len() }
+    pub fn is_empty(&self) -> bool { self.len() == 0 }
+    pub fn at(&self, index: usize) -> ServerResult<RowHandle<S, T>> {
+        let ordinal = (self.positions)(&self.snapshot, self.slot).get(index)
+            .ok_or_else(|| ConfigError::new(ErrorCode::KeyNotFound, "Group index out of range"))?;
+        Ok(RowHandle { snapshot: self.snapshot.clone(), row: (self.rows)(&self.snapshot)[*ordinal].clone() })
+    }
+    pub fn borrow(&self) -> Group<'_, T> {
+        Group { rows: (self.rows)(&self.snapshot), positions: (self.positions)(&self.snapshot, self.slot) }
+    }
+}
+pub fn invalid<T>(message: &str) -> Result<T> {
+    Err(format!("配置数据无效：{message}"))
+}
+#[derive(Clone, Debug)]
+pub enum Json {
+    Null,
+    Bool(bool),
+    Number(String),
+    String(String),
+    Array(Vec<Json>),
+    Object(BTreeMap<String, Json>),
+}
+impl Json {
+    pub fn field(&self, name: &str) -> Result<&Json> {
+        match self {
+            Self::Object(m) => m.get(name).ok_or_else(|| format!("缺少成员：{name}")),
+            _ => invalid("需要对象"),
+        }
+    }
+    pub fn string(&self) -> Result<&str> {
+        match self {
+            Self::String(s) => Ok(s),
+            _ => invalid("需要字符串"),
+        }
+    }
+    pub fn array(&self) -> Result<&[Json]> {
+        match self {
+            Self::Array(a) => Ok(a),
+            _ => invalid("需要数组"),
+        }
+    }
+    pub fn boolean(&self) -> Result<bool> {
+        match self {
+            Self::Bool(v) => Ok(*v),
+            _ => invalid("需要布尔值"),
+        }
+    }
+    pub fn object_len(&self) -> Result<usize> {
+        match self {
+            Self::Object(m) => Ok(m.len()),
+            _ => invalid("需要对象"),
+        }
+    }
+    pub fn scalar_text(&self) -> Result<&str> {
+        match self {
+            Self::String(s) | Self::Number(s) => Ok(s),
+            _ => invalid("需要数值"),
+        }
+    }
+    pub fn is_null(&self) -> bool {
+        matches!(self, Self::Null)
+    }
+}
+struct JsonAllocationBounds {array:usize,members:usize,string_bytes:usize,depth:usize,rows:usize,root_array:&'static str}
+impl JsonAllocationBounds {
+    fn manifest(limits:&ResourceLimits)->Self{Self{array:64,members:32,string_bytes:4096,depth:8,rows:limits.max_tables,root_array:"tables"}}
+    fn new(schema:&Json,limits:&ResourceLimits)->Result<Self>{
+        let mut result=Self{root_array:"rows",array:64.max(limits.max_container_elements),members:4,string_bytes:256.max(limits.max_string_bytes),depth:72.min(limits.max_depth*2+8),rows:limits.max_rows};
+        result.string_bytes=result.string_bytes.max(schema.field("name")?.string()?.len());
+        let mut fields=|values:&Json|->Result<()>{result.members=result.members.max(values.array()?.len()+1);for field in values.array()?{result.string_bytes=result.string_bytes.max(field.field("name")?.string()?.len());}Ok(())};
+        fields(schema.field("fields")?)?;
+        for value in schema.field("types")?.array()?{if let Json::Object(m)=value{if let Some(values)=m.get("fields"){fields(values)?;}}}
+        for value in schema.field("types")?.array()?{result.string_bytes=result.string_bytes.max(value.field("id")?.string()?.len());}
+        Ok(result)
+    }
+    fn exceeded<T>()->Result<T>{DECODE_STAGE.with(|s|s.set("parse"));decode_limit("JSON allocation limit exceeded")}
+}
+pub fn parse_json(source: &str) -> Result<Json> {parse_json_scoped(source,None)}
+fn parse_json_scoped(source:&str,bounds:Option<&JsonAllocationBounds>)->Result<Json>{
+    struct Parser<'a> {
+        bytes: &'a [u8],
+        bounds:Option<&'a JsonAllocationBounds>,
+        pos: usize,
+        nodes: usize,
+    }
+    impl Parser<'_> {
+        fn peek(&self) -> u8 {
+            self.bytes.get(self.pos).copied().unwrap_or(0)
+        }
+        fn ws(&mut self) {
+            while matches!(self.peek(), b' ' | b'\t' | b'\r' | b'\n') {
+                self.pos += 1;
+            }
+        }
+        fn hex(&mut self) -> Result<u32> {
+            let end = self.pos.checked_add(4).ok_or("Unicode 越界")?;
+            let bytes = self.bytes.get(self.pos..end).ok_or("Unicode 转义截断")?;
+            let s = std::str::from_utf8(bytes).map_err(|e| e.to_string())?;
+            let n = u32::from_str_radix(s, 16).map_err(|e| e.to_string())?;
+            self.pos = end;
+            Ok(n)
+        }
+        fn string(&mut self) -> Result<String> {
+            self.pos += 1;
+            let mut bytes = Vec::new();
+            loop {
+                let c = self.peek();
+                self.pos += 1;
+                match c {
+                    b'"' => return String::from_utf8(bytes).map_err(|e| e.to_string()),
+                    0..=31 => return invalid("字符串截断或含控制字符"),
+                    b'\\' => {
+                        let escape = self.peek();
+                        self.pos += 1;
+                        match escape {
+                            b'"' | b'\\' | b'/' => bytes.push(escape),
+                            b'b' => bytes.push(8),
+                            b'f' => bytes.push(12),
+                            b'n' => bytes.push(10),
+                            b'r' => bytes.push(13),
+                            b't' => bytes.push(9),
+                            b'u' => {
+                                let mut cp = self.hex()?;
+                                if (0xd800..=0xdbff).contains(&cp) {
+                                    if self.bytes.get(self.pos..self.pos + 2) != Some(b"\\u") {
+                                        return invalid("孤立代理项");
+                                    }
+                                    self.pos += 2;
+                                    let low = self.hex()?;
+                                    if !(0xdc00..=0xdfff).contains(&low) {
+                                        return invalid("孤立代理项");
+                                    }
+                                    cp = 0x10000 + (cp - 0xd800) * 1024 + low - 0xdc00;
+                                }
+                                let ch = char::from_u32(cp).ok_or("Unicode 码点无效")?;
+                                let mut encoded = [0u8; 4];
+                                bytes.extend_from_slice(ch.encode_utf8(&mut encoded).as_bytes());
+                            }
+                            _ => return invalid("字符串转义无效"),
+                        }
+                    }
+                    _ => bytes.push(c),
+                }
+                if self.bounds.map_or(false,|b|bytes.len()>b.string_bytes){return JsonAllocationBounds::exceeded();}
+                if bytes.len() > 16777216 {
+                    return invalid("字符串过长");
+                }
+            }
+        }
+        fn value(&mut self, depth: usize,rows:bool) -> Result<Json> {
+            if self.bounds.map_or(false,|b|depth>b.depth){return JsonAllocationBounds::exceeded();}
+            self.ws();
+            self.nodes += 1;
+            if depth > 72 || self.nodes > 32000000 {
+                return invalid("JSON 超限");
+            }
+            match self.peek() {
+                b'"' => Ok(Json::String(self.string()?)),
+                b'{' => {
+                    self.pos += 1;
+                    self.ws();
+                    let mut m = BTreeMap::new();
+                    if self.peek() == b'}' {
+                        self.pos += 1;
+                        return Ok(Json::Object(m));
+                    }
+                    loop {
+                        if self.bounds.map_or(false,|b|m.len()>=b.members){return JsonAllocationBounds::exceeded();}
+                        self.ws();
+                        if self.peek() != b'"' {
+                            return invalid("成员名无效");
+                        }
+                        let k = self.string()?;
+                        self.ws();
+                        if self.peek() != b':' {
+                            return invalid("缺少冒号");
+                        }
+                        self.pos += 1;
+                        let is_rows=depth==0&&k==self.bounds.map_or("rows",|b|b.root_array);
+                        if m.insert(k, self.value(depth + 1,is_rows)?).is_some() {
+                            return invalid("JSON 成员重复");
+                        }
+                        self.ws();
+                        let c = self.peek();
+                        self.pos += 1;
+                        if c == b'}' {
+                            return Ok(Json::Object(m));
+                        }
+                        if c != b',' {
+                            return invalid("对象分隔符无效");
+                        }
+                    }
+                }
+                b'[' => {
+                    self.pos += 1;
+                    self.ws();
+                    let mut a = Vec::new();
+                    if self.peek() == b']' {
+                        self.pos += 1;
+                        return Ok(Json::Array(a));
+                    }
+                    loop {
+                        if self.bounds.map_or(false,|b|a.len()>=if rows{b.rows}else{b.array}){return JsonAllocationBounds::exceeded();}
+                        a.push(self.value(depth + 1,false)?);
+                        self.ws();
+                        let c = self.peek();
+                        self.pos += 1;
+                        if c == b']' {
+                            return Ok(Json::Array(a));
+                        }
+                        if c != b',' {
+                            return invalid("数组分隔符无效");
+                        }
+                    }
+                }
+                b't' if self.bytes.get(self.pos..self.pos + 4) == Some(b"true") => {
+                    self.pos += 4;
+                    Ok(Json::Bool(true))
+                }
+                b'f' if self.bytes.get(self.pos..self.pos + 5) == Some(b"false") => {
+                    self.pos += 5;
+                    Ok(Json::Bool(false))
+                }
+                b'n' if self.bytes.get(self.pos..self.pos + 4) == Some(b"null") => {
+                    self.pos += 4;
+                    Ok(Json::Null)
+                }
+                _ => {
+                    let start = self.pos;
+                    if self.peek() == b'-' {
+                        self.pos += 1;
+                    }
+                    match self.peek() {
+                        b'0' => self.pos += 1,
+                        b'1'..=b'9' => {
+                            while self.peek().is_ascii_digit() {
+                                self.pos += 1;
+                            }
+                        }
+                        _ => return invalid("JSON 数字无效"),
+                    }
+                    if self.peek() == b'.' {
+                        self.pos += 1;
+                        if !self.peek().is_ascii_digit() {
+                            return invalid("小数无效");
+                        }
+                        while self.peek().is_ascii_digit() {
+                            self.pos += 1;
+                        }
+                    }
+                    if matches!(self.peek(), b'e' | b'E') {
+                        self.pos += 1;
+                        if matches!(self.peek(), b'+' | b'-') {
+                            self.pos += 1;
+                        }
+                        if !self.peek().is_ascii_digit() {
+                            return invalid("指数无效");
+                        }
+                        while self.peek().is_ascii_digit() {
+                            self.pos += 1;
+                        }
+                    }
+                    if self.pos - start > 1024 {
+                        return invalid("数字过长");
+                    }
+                    let token = std::str::from_utf8(&self.bytes[start..self.pos])
+                        .map_err(|e| e.to_string())?;
+                    if !token.parse::<f64>().map_err(|e| e.to_string())?.is_finite() {
+                        return invalid("非有限数字");
+                    }
+                    Ok(Json::Number(token.to_owned()))
+                }
+            }
+        }
+    }
+    let mut p = Parser {
+        bytes: source.as_bytes(),
+        bounds,
+        pos: 0,
+        nodes: 0,
+    };
+    let result = p.value(0,false)?;
+    p.ws();
+    if p.pos != p.bytes.len() {
+        return invalid("JSON 尾部数据");
+    }
+    Ok(result)
+}
+pub trait Scalar: Sized {
+    fn decode(v: &Json) -> Result<Self>;
+}
+macro_rules! small_integer { ($($t:ty),*) => {$ (impl Scalar for $t { fn decode(v:&Json)->Result<Self>{match v {Json::Number(s)=>s.parse::<Self>().map_err(|e|e.to_string()),_=>invalid("整数需要 JSON 数字")}} })*}; }
+small_integer!(i8, u8, i16, u16, i32, u32);
+macro_rules! large_integer { ($($t:ty),*) => {$ (impl Scalar for $t { fn decode(v:&Json)->Result<Self>{let s=v.string()?;if s.starts_with('+')||s.is_empty()||s.trim()!=s{return invalid("64 位整数格式无效");}s.parse::<Self>().map_err(|e|e.to_string())} })*}; }
+large_integer!(i64, u64);
+impl Scalar for bool {
+    fn decode(v: &Json) -> Result<Self> {
+        v.boolean()
+    }
+}
+impl Scalar for String {
+    fn decode(v: &Json) -> Result<Self> {
+        Ok(v.string()?.to_owned())
+    }
+}
+macro_rules! floating { ($($t:ty),*) => {$ (impl Scalar for $t { fn decode(v:&Json)->Result<Self>{match v {Json::Number(s)=>{let n=s.parse::<Self>().map_err(|e|e.to_string())?;if !n.is_finite(){return invalid("浮点数越界");}Ok(n)},_=>invalid("浮点数需要 JSON 数字")}} })*}; }
+floating!(f32, f64);
+pub fn scalar<T: Scalar>(v: &Json) -> Result<T> {
+    T::decode(v)
+}
+// 精确 decimal 使用 96 位范围内的整数系数；构造时去掉尾零，比较和哈希不分配字符串。
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub struct Decimal {
+    coefficient: i128,
+    scale: u8,
+}
+impl Decimal {
+    pub fn parse(s: &str) -> Result<Self> {
+        let (negative, digits) = if let Some(s) = s.strip_prefix('-') {
+            (true, s)
+        } else {
+            (false, s)
+        };
+        let mut coefficient = 0i128;
+        let mut scale = 0u8;
+        let mut dot = false;
+        let mut whole = 0;
+        let mut fraction = 0;
+        for b in digits.bytes() {
+            if b == b'.' && !dot {
+                dot = true;
+                continue;
+            }
+            if !b.is_ascii_digit() {
+                return invalid("decimal 格式无效");
+            }
+            coefficient = coefficient
+                .checked_mul(10)
+                .and_then(|n| n.checked_add((b - b'0') as i128))
+                .ok_or("decimal 越界")?;
+            if coefficient > 79228162514264337593543950335i128 {
+                return invalid("decimal 越界");
+            }
+            if dot {
+                fraction += 1;
+                scale = scale.checked_add(1).ok_or("decimal 精度超限")?;
+                if scale > 28 {
+                    return invalid("decimal 精度超限");
+                }
+            } else {
+                whole += 1;
+            }
+        }
+        if whole == 0 || (dot && fraction == 0) {
+            return invalid("decimal 格式无效");
+        }
+        while scale > 0 && coefficient % 10 == 0 {
+            coefficient /= 10;
+            scale -= 1;
+        }
+        Ok(Self {
+            coefficient: if negative { -coefficient } else { coefficient },
+            scale,
+        })
+    }
+}
+impl std::fmt::Display for Decimal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let n = self.coefficient.abs();
+        if self.coefficient < 0 {
+            f.write_str("-")?;
+        }
+        if self.scale == 0 {
+            return write!(f, "{n}");
+        }
+        let divisor = 10i128.pow(self.scale as u32);
+        write!(
+            f,
+            "{}.{:0width$}",
+            n / divisor,
+            n % divisor,
+            width = self.scale as usize
+        )
+    }
+}
+impl Scalar for Decimal {
+    fn decode(v: &Json) -> Result<Self> {
+        Self::parse(v.string()?)
+    }
+}
+pub trait Key: PartialEq {
+    fn hash_key(&self, state: &mut DefaultHasher);
+}
+macro_rules! hash_key { ($($t:ty),*) => {$ (impl Key for $t {fn hash_key(&self,state:&mut DefaultHasher){self.hash(state);}})*}; }
+hash_key!(i8, u8, i16, u16, i32, u32, i64, u64, bool, String, str, Decimal);
+impl Key for f32 {
+    fn hash_key(&self, state: &mut DefaultHasher) {
+        (if *self == 0.0 { 0 } else { self.to_bits() }).hash(state);
+    }
+}
+impl Key for f64 {
+    fn hash_key(&self, state: &mut DefaultHasher) {
+        (if *self == 0.0 { 0 } else { self.to_bits() }).hash(state);
+    }
+}
+pub fn hash_part<T: Key + ?Sized>(state: &mut DefaultHasher, value: &T) {
+    value.hash_key(state);
+}
+pub fn finish_hash(state: DefaultHasher) -> u64 {
+    state.finish()
+}
+pub fn new_hash() -> DefaultHasher {
+    DefaultHasher::new()
+}
+pub struct Index {
+    slots: Vec<usize>,
+    groups: Vec<Vec<usize>>,
+    mask: usize,
+}
+impl Index {
+    pub fn build(
+        n: usize,
+        unique: bool,
+        hash: impl Fn(usize) -> u64,
+        same: impl Fn(usize, usize) -> bool,
+    ) -> Result<Self> {
+        Self::build_shared(n,unique,&hash,&same)
+    }
+    #[inline(never)]
+    fn build_shared(n:usize,unique:bool,hash:&dyn Fn(usize)->u64,same:&dyn Fn(usize,usize)->bool)->Result<Self>{
+        let capacity = n
+            .checked_mul(2)
+            .and_then(|n| n.checked_add(1))
+            .ok_or("索引过大")?
+            .next_power_of_two();
+        let mut index = Self {
+            slots: vec![usize::MAX; capacity],
+            groups: if unique {
+                Vec::new()
+            } else {
+                vec![Vec::new(); capacity]
+            },
+            mask: capacity - 1,
+        };
+        for row in 0..n {
+            let mut slot = hash(row) as usize & index.mask;
+            while index.slots[slot] != usize::MAX && !same(index.slots[slot], row) {
+                slot = (slot + 1) & index.mask;
+            }
+            if unique && index.slots[slot] != usize::MAX {
+                return invalid("主键重复");
+            }
+            if index.slots[slot] == usize::MAX {
+                index.slots[slot] = row;
+            }
+            if !unique {
+                index.groups[slot].push(row);
+            }
+        }
+        Ok(index)
+    }
+    pub fn find(&self, hash: u64, same: impl Fn(usize) -> bool) -> Option<usize> {
+        let mut slot = hash as usize & self.mask;
+        while self.slots[slot] != usize::MAX {
+            if same(self.slots[slot]) {
+                return Some(slot);
+            }
+            slot = (slot + 1) & self.mask;
+        }
+        None
+    }
+    pub fn row(&self, slot: usize) -> usize {
+        self.slots[slot]
+    }
+    pub fn group(&self, slot: Option<usize>) -> &[usize] {
+        match slot {
+            Some(s) => &self.groups[s],
+            None => &[],
+        }
+    }
+    pub(super) fn take_shared_groups(&mut self)->Vec<Arc<[usize]>>{
+        let empty:Arc<[usize]>=Arc::from(Vec::<usize>::new().into_boxed_slice());
+        std::mem::take(&mut self.groups).into_iter().map(|group|if group.is_empty(){empty.clone()}else{Arc::from(group.into_boxed_slice())}).collect()
+    }
+}
+// 分组视图只借用记录及行号，不复制集合，也不创建临时 Vec。
+#[derive(Clone, Copy)]
+pub struct Group<'a, T> {
+    pub rows: &'a [Arc<T>],
+    pub positions: &'a [usize],
+}
+impl<'a, T> Group<'a, T> {
+    pub fn len(&self) -> usize {
+        self.positions.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.positions.is_empty()
+    }
+    pub fn get(&self, i: usize) -> Option<&'a T> {
+        self.positions.get(i).map(|p| self.rows[*p].as_ref())
+    }
+    pub fn iter(&self) -> impl Iterator<Item = &'a T> + '_ {
+        self.positions.iter().map(|p| self.rows[*p].as_ref())
+    }
+}
+pub struct Dictionary<K, V> {
+    entries: Vec<(K, V)>,
+    index: Index,
+}
+impl<K: Key, V> Dictionary<K, V> {
+    pub fn new(entries: Vec<(K, V)>) -> Result<Self> {
+        let index = Index::build(
+            entries.len(),
+            true,
+            |i| {
+                let mut h = new_hash();
+                entries[i].0.hash_key(&mut h);
+                finish_hash(h)
+            },
+            |a, b| entries[a].0 == entries[b].0,
+        )?;
+        Ok(Self { entries, index })
+    }
+    pub fn get(&self, key: &K) -> Option<&V> {
+        let mut h = new_hash();
+        key.hash_key(&mut h);
+        self.index
+            .find(finish_hash(h), |i| self.entries[i].0 == *key)
+            .map(|s| &self.entries[self.index.row(s)].1)
+    }
+    pub fn entries(&self) -> &[(K, V)] {
+        &self.entries
+    }
+    pub fn len(&self) -> usize {
+        self.entries.len()
+    }
+}
+pub struct Matrix<T> {
+    dimensions: Vec<usize>,
+    values: Vec<T>,
+}
+impl<T> Matrix<T> {
+    pub fn dimensions(&self) -> &[usize] {
+        &self.dimensions
+    }
+    pub fn values(&self) -> &[T] {
+        &self.values
+    }
+}
+pub fn decode_optional<T>(v: &Json, read: impl Fn(&Json) -> Result<T>) -> Result<Option<T>> {
+    if v.is_null() {
+        Ok(None)
+    } else {
+        Ok(Some(read(v)?))
+    }
+}
+pub fn decode_list<T>(v: &Json, read: impl Fn(&Json) -> Result<T>) -> Result<Vec<T>> {
+    v.array()?.iter().map(read).collect()
+}
+pub fn decode_matrix<T>(v: &Json, read: impl Fn(&Json) -> Result<T>) -> Result<Matrix<T>> {
+    Ok(Matrix {
+        dimensions: v
+            .field("dimensions")?
+            .array()?
+            .iter()
+            .map(|v| Ok(scalar::<i32>(v)? as usize))
+            .collect::<Result<_>>()?,
+        values: decode_list(v.field("values")?, read)?,
+    })
+}
+pub fn decode_dictionary<K: Key, V>(
+    v: &Json,
+    key: impl Fn(&Json) -> Result<K>,
+    value: impl Fn(&Json) -> Result<V>,
+) -> Result<Dictionary<K, V>> {
+    Dictionary::new(
+        v.array()?
+            .iter()
+            .map(|p| {
+                let p = p.array()?;
+                if p.len() != 2 {
+                    return invalid("字典项无效");
+                }
+                Ok((key(&p[0])?, value(&p[1])?))
+            })
+            .collect::<Result<_>>()?,
+    )
+}
+struct Cursor<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+}
+impl Cursor<'_> {
+    fn take(&mut self, n: usize) -> Result<&[u8]> {
+        let end = self.pos.checked_add(n).ok_or("二进制偏移溢出")?;
+        let b = self.bytes.get(self.pos..end).ok_or("二进制截断")?;
+        self.pos = end;
+        Ok(b)
+    }
+    fn bits(&mut self, n: usize) -> Result<u64> {
+        let mut a = [0u8; 8];
+        a[..n].copy_from_slice(self.take(n)?);
+        Ok(u64::from_le_bytes(a))
+    }
+    fn i32(&mut self) -> Result<i32> {
+        Ok(self.bits(4)? as i32)
+    }
+    fn count(&mut self, max: usize) -> Result<usize> {
+        let n = self.i32()?;
+        if n < 0 || n as usize > max {
+            return invalid("数量超限");
+        }
+        Ok(n as usize)
+    }
+    fn boolean(&mut self) -> Result<bool> {
+        match self.bits(1)? {
+            0 => Ok(false),
+            1 => Ok(true),
+            _ => invalid("布尔值编码无效"),
+        }
+    }
+    fn string(&mut self) -> Result<String> {
+        let n = self.i32()?;
+        if n == -1 {
+            return Ok(String::new());
+        }
+        if !(0..=16777216).contains(&n) {
+            return invalid("字符串长度无效");
+        }
+        if n as usize>decode_string_limit(){return decode_limit("String byte limit exceeded");}
+        Ok(std::str::from_utf8(self.take(n as usize)?).map_err(decode_utf8)?.to_owned())
+    }
+    fn scalar(&mut self, kind: &str) -> Result<Json> {
+        Ok(match kind {
+            "string" => Json::String(self.string()?),
+            "bool" => Json::Bool(self.boolean()?),
+            "int64" => Json::String((self.bits(8)? as i64).to_string()),
+            "uint64" => Json::String(self.bits(8)?.to_string()),
+            "float32" => Json::Number(f32::from_bits(self.bits(4)? as u32).to_string()),
+            "float64" => Json::Number(f64::from_bits(self.bits(8)?).to_string()),
+            "decimal" => {
+                let lo = self.bits(4)? as u128;
+                let mid = self.bits(4)? as u128;
+                let hi = self.bits(4)? as u128;
+                let flags = self.bits(4)? as u32;
+                let scale = (flags >> 16) & 255;
+                if flags & 0x7f00ffff != 0 || scale > 28 {
+                    return invalid("decimal 编码无效");
+                }
+                let n = lo | (mid << 32) | (hi << 64);
+                let mut s = format!("{n:0width$}", width = scale as usize + 1);
+                if scale > 0 {
+                    s.insert(s.len() - scale as usize, '.');
+                }
+                if flags >> 31 != 0 {
+                    s.insert(0, '-');
+                }
+                Json::String(s)
+            }
+            _ => {
+                let unsigned = kind.starts_with("uint");
+                let bits = kind[if unsigned { 4 } else { 3 }..]
+                    .parse::<usize>()
+                    .map_err(|e| e.to_string())?;
+                let n = self.bits(bits / 8)?;
+                Json::Number(if unsigned {
+                    n.to_string()
+                } else {
+                    ((n << (64 - bits)) as i64 >> (64 - bits)).to_string()
+                })
+            }
+        })
+    }
+}
+#[derive(Clone)]
+struct Wire {
+    schema: Arc<Json>,
+    types: Arc<HashMap<String, Json>>,
+    tags: Arc<Vec<String>>,
+    remaining: Cell<usize>,
+}
+impl Wire {
+    fn new(source: &str) -> Result<Self> {
+        let schema = parse_json(source)?;
+        let mut types = HashMap::new();
+        for t in schema.field("types")?.array()? {
+            types.insert(t.field("id")?.string()?.to_owned(), t.clone());
+        }
+        Ok(Self {
+            schema:Arc::new(schema),
+            types:Arc::new(types),
+            tags: Arc::new(Vec::new()),
+            remaining: Cell::new(8000000),
+        })
+    }
+    fn claim(&self, n: usize) -> Result<()> {
+        if n > 1000000 || n > self.remaining.get() {
+            return decode_limit("元素预算超限");
+        }
+        self.remaining.set(self.remaining.get() - n);
+        Ok(())
+    }
+    fn type_of(&self, id: &str) -> Result<&Json> {
+        self.types.get(id).ok_or_else(|| format!("未知类型：{id}"))
+    }
+    fn read_fields(&self, fields: &Json, r: &mut Cursor<'_>, depth: usize) -> Result<Json> {
+        let mut m = BTreeMap::new();
+        for f in fields.array()? {
+            m.insert(
+                f.field("name")?.string()?.to_owned(),
+                self.read_value(f.field("type")?.string()?,r,depth+1).map_err(|error|field_failure(error,f.field("name").and_then(Json::string).unwrap_or("")))?,
+            );
+        }
+        Ok(Json::Object(m))
+    }
+    fn read_value(&self, id: &str, r: &mut Cursor<'_>, depth: usize) -> Result<Json> {
+        if depth > decode_depth() {
+            return decode_limit("嵌套过深");
+        }
+        let t = self.type_of(id)?;
+        let kind = t.field("kind")?.string()?;
+        match kind {
+            "primitive" | "enum" | "tablereference" => {
+                return r.scalar(t.field("primitive")?.string()?)
+            }
+            "rawjson" => return Ok(Json::String(r.string()?)),
+            "nullable" => {
+                return if r.boolean()? {
+                    self.read_value(t.field("element")?.string()?, r, depth + 1)
+                } else {
+                    Ok(Json::Null)
+                }
+            }
+            "array" => {
+                let rank = scalar::<i32>(t.field("rank")?)?;
+                let mut dims = Vec::new();
+                let mut n = 1usize;
+                for _ in 0..rank {
+                    let d = r.count(1000000)?;
+                    n = n
+                        .checked_mul(d)
+                        .filter(|n| *n <= 1000000)
+                        .ok_or("矩阵过大")?;
+                    dims.push(Json::Number(d.to_string()));
+                }
+                self.claim(n)?;
+                let mut a = Vec::with_capacity(n);
+                for i in 0..n {
+                    a.push(self.read_value(t.field("element")?.string()?, r, depth + 1).map_err(|e|field_failure(e,&format!("[{}]",i)))?);
+                }
+                if rank == 1 {
+                    return Ok(Json::Array(a));
+                }
+                return Ok(Json::Object(BTreeMap::from([
+                    ("dimensions".to_owned(), Json::Array(dims)),
+                    ("values".to_owned(), Json::Array(a)),
+                ])));
+            }
+            "dictionary" => {
+                let n = r.count(1000000)?;
+                self.claim(n)?;
+                let mut a = Vec::with_capacity(n);
+                for i in 0..n {
+                    a.push(Json::Array(vec![
+                        self.read_value(t.field("key")?.string()?, r, depth + 1).map_err(|e|field_failure(e,&format!("[{}].key",i)))?,
+                        self.read_value(t.field("element")?.string()?, r, depth + 1).map_err(|e|field_failure(e,&format!("[{}].value",i)))?,
+                    ]));
+                }
+                return Ok(Json::Array(a));
+            }
+            _ => {}
+        }
+        if !t.field("variants")?.array()?.is_empty() {
+            let tag = r.i32()?;
+            if tag == -1 {
+                return Ok(Json::Null);
+            }
+            let name = self.tags.get(tag as usize).ok_or("多态标签无效")?;
+            if !contains(t.field("variants")?, name)? {
+                return invalid("多态类型无效");
+            }
+            let mut v = self.read_fields(self.type_of(name)?.field("fields")?, r, depth)?;
+            if let Json::Object(ref mut m) = v {
+                m.insert("$type".to_owned(), Json::String(name.clone()));
+            }
+            return Ok(v);
+        }
+        if t.field("nullableObject")?.boolean()? && !r.boolean()? {
+            return Ok(Json::Null);
+        }
+        self.read_fields(t.field("fields")?, r, depth)
+    }
+    fn validate_fields(&self, fields: &Json, v: &Json, depth: usize, tagged: bool) -> Result<()> {
+        if v.object_len()? != fields.array()?.len() + usize::from(tagged) {
+            return invalid("未知或缺失成员");
+        }
+        for f in fields.array()? {
+            self.validate(
+                f.field("type")?.string()?,
+                v.field(f.field("name")?.string()?)?,
+                depth + 1,
+            ).map_err(|error|field_failure(error,f.field("name").and_then(Json::string).unwrap_or("")))?;
+        }
+        Ok(())
+    }
+    fn validate(&self, id: &str, v: &Json, depth: usize) -> Result<()> {
+        if depth > decode_depth() {
+            return decode_limit("嵌套过深");
+        }
+        let t = self.type_of(id)?;
+        let kind = t.field("kind")?.string()?;
+        if matches!(kind, "primitive" | "enum" | "tablereference") {
+            macro_rules! check {
+                ($t:ty) => {{
+                    scalar::<$t>(v)?;
+                }};
+            }
+            match t.field("primitive")?.string()? {
+                "string" => {
+                    if v.string()?.len()>decode_string_limit(){return decode_limit("String byte limit exceeded");}
+                }
+                "bool" => check!(bool),
+                "int8" => check!(i8),
+                "uint8" => check!(u8),
+                "int16" => check!(i16),
+                "uint16" => check!(u16),
+                "int32" => check!(i32),
+                "uint32" => check!(u32),
+                "int64" => check!(i64),
+                "uint64" => check!(u64),
+                "float32" => check!(f32),
+                "float64" => check!(f64),
+                "decimal" => check!(Decimal),
+                _ => return invalid("未知标量"),
+            }
+            if kind == "enum" && !contains(t.field("enumValues")?, v.scalar_text()?)? {
+                return invalid("未知枚举值");
+            }
+            return Ok(());
+        }
+        match kind {
+            "rawjson" => {
+                if v.string()?.len()>decode_string_limit(){return decode_limit("String byte limit exceeded");}
+                parse_json(v.string()?)?;
+                return Ok(());
+            }
+            "nullable" => {
+                return if v.is_null() {
+                    Ok(())
+                } else {
+                    self.validate(t.field("element")?.string()?, v, depth + 1)
+                }
+            }
+            "array" => {
+                let rank = scalar::<i32>(t.field("rank")?)?;
+                let values = if rank == 1 {
+                    v.array()?
+                } else {
+                    if v.object_len()? != 2 {
+                        return invalid("矩阵字段无效");
+                    }
+                    let dims = v.field("dimensions")?.array()?;
+                    if dims.len() != rank as usize {
+                        return invalid("矩阵维数错误");
+                    }
+                    let mut n = 1usize;
+                    for d in dims {
+                        let d = scalar::<u32>(d)? as usize;
+                        if d > 1000000 {
+                            return invalid("矩阵维度过大");
+                        }
+                        n = n
+                            .checked_mul(d)
+                            .filter(|n| *n <= 1000000)
+                            .ok_or("矩阵过大")?;
+                    }
+                    let a = v.field("values")?.array()?;
+                    if n != a.len() {
+                        return invalid("矩阵长度错误");
+                    }
+                    a
+                };
+                self.claim(values.len())?;
+                for (i,x) in values.iter().enumerate() {
+                    self.validate(t.field("element")?.string()?, x, depth + 1).map_err(|e|field_failure(e,&format!("[{}]",i)))?;
+                }
+                return Ok(());
+            }
+            "dictionary" => {
+                let a = v.array()?;
+                self.claim(a.len())?;
+                for (i,p) in a.iter().enumerate() {
+                    let p = p.array()?;
+                    if p.len() != 2 {
+                        return invalid("字典项无效");
+                    }
+                    self.validate(t.field("key")?.string()?, &p[0], depth + 1).map_err(|e|field_failure(e,&format!("[{}].key",i)))?;
+                    self.validate(t.field("element")?.string()?, &p[1], depth + 1).map_err(|e|field_failure(e,&format!("[{}].value",i)))?;
+                }
+                return Ok(());
+            }
+            _ => {}
+        }
+        if v.is_null() && t.field("nullableObject")?.boolean()? {
+            return Ok(());
+        }
+        if !t.field("variants")?.array()?.is_empty() {
+            let tag = v.field("$type")?.string()?;
+            if !contains(t.field("variants")?, tag)? {
+                return invalid("未知多态类型");
+            }
+            return self.validate_fields(self.type_of(tag)?.field("fields")?, v, depth, true);
+        }
+        self.validate_fields(t.field("fields")?, v, depth, false)
+    }
+    fn read(&mut self, bytes: &[u8], json: bool) -> Result<Vec<Json>> {
+        let rows = if json {
+            let mut doc = parse_json(std::str::from_utf8(bytes).map_err(|e| e.to_string())?)?;
+            if doc.object_len()? != 4
+                || doc.field("format")?.string()? != "ZrConfig.TableJson/1"
+                || doc.field("table")?.string()? != self.schema.field("name")?.string()?
+                || doc.field("schemaHash")?.string()? != self.schema.field("hash")?.string()?
+            {
+                return invalid("JSON 表头不匹配");
+            }
+            match &mut doc {
+                Json::Object(m) => match m.remove("rows") {
+                    Some(Json::Array(rows)) if rows.len() <= 5000000 => rows,
+                    _ => return invalid("行数组无效"),
+                },
+                _ => unreachable!(),
+            }
+        } else {
+            let mut r = Cursor { bytes, pos: 0 };
+            if r.i32()? != 0x4643525a
+                || r.i32()? != 4
+                || r.string()? != self.schema.field("name")?.string()?
+                || r.string()? != self.schema.field("hash")?.string()?
+            {
+                return invalid("二进制表头不匹配");
+            }
+            let n = r.count(5000000)?;
+            if n * 12 > bytes.len() - r.pos {
+                return invalid("行索引过短");
+            }
+            let nt = r.count(self.schema.field("tags")?.array()?.len())?;
+            let mut seen = HashSet::new();
+            for _ in 0..nt {
+                let tag = r.string()?;
+                if !contains(self.schema.field("tags")?, &tag)? || !seen.insert(tag.clone()) {
+                    return invalid("类型目录无效");
+                }
+                Arc::make_mut(&mut self.tags).push(tag);
+            }
+            let mut indexes = Vec::with_capacity(n);
+            let mut end = 0usize;
+            let keys = self.schema.field("keys")?.array()?;
+            for _ in 0..n {
+                self.remaining.set(decode_elements());
+                let mut values = Vec::new();
+                for key in keys {
+                    let field = self
+                        .schema
+                        .field("fields")?
+                        .array()?
+                        .iter()
+                        .find(|f| f.field("name").and_then(Json::string).ok() == key.string().ok())
+                        .ok_or("未知主键")?;
+                    values.push(self.read_value(field.field("type")?.string()?, &mut r, 0)?);
+                }
+                let id = r.i32()?;
+                let offset = r.count(i32::MAX as usize)?;
+                let length = r.count(i32::MAX as usize)?;
+                if offset != end {
+                    return invalid("行索引不连续");
+                }
+                end = end.checked_add(length).ok_or("文件过大")?;
+                indexes.push((values, id, offset, length));
+            }
+            let start = r.pos;
+            if start.checked_add(end) != Some(bytes.len()) {
+                return invalid("文件长度不匹配");
+            }
+            let mut rows = Vec::with_capacity(n);
+            for (values, id, offset, length) in indexes {
+                self.remaining.set(decode_elements());
+                let row = self.read_fields(self.schema.field("fields")?, &mut r, 0)?;
+                if r.pos != start + offset + length
+                    || id
+                        != if self.schema.field("hasId")?.boolean()? {
+                            scalar::<i32>(row.field("Id")?)?
+                        } else {
+                            0
+                        }
+                {
+                    return invalid("行边界或 Id 不匹配");
+                }
+                for (i, key) in keys.iter().enumerate() {
+                    if !same_scalar(row.field(key.string()?)?, &values[i]) {
+                        return invalid("主键与索引不匹配");
+                    }
+                }
+                rows.push(row);
+            }
+            rows
+        };
+        for row in &rows {
+            self.remaining.set(decode_elements());
+            self.validate_fields(self.schema.field("fields")?, row, 0, false)?;
+        }
+        Ok(rows)
+    }
+}
+
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum LoadMode { ServerDefault, SelectedTables, LazyRowsStrict, LazyRowsOnAccess }
+pub(super) fn load_plan_fingerprint(mode:LoadMode,json:bool,tables:&[String])->String{
+    let mode=match mode{LoadMode::ServerDefault=>"ServerDefault",LoadMode::SelectedTables=>"SelectedTables",LoadMode::LazyRowsStrict=>"LazyRowsStrict",LoadMode::LazyRowsOnAccess=>"LazyRowsOnAccess"};
+    let digits=b"0123456789abcdef";let mut names:Vec<String>=tables.iter().map(|name|{let mut encoded=String::new();for byte in name.as_bytes(){encoded.push(digits[(byte>>4)as usize]as char);encoded.push(digits[(byte&15)as usize]as char);}encoded}).collect();names.sort();
+    sha256(format!("zrconfig-load-plan/1\n{}\n{}\n{}",mode,if json{"json-preferred"}else{"binary"},names.join("\n")).as_bytes())
+}
+#[derive(Clone)]
+pub struct LoadPlan { pub mode: LoadMode, pub tables: Option<Vec<String>>, pub prefer_json: bool, pub warmup_tables: Vec<String> }
+impl Default for LoadPlan { fn default()->Self{Self{mode:LoadMode::ServerDefault,tables:None,prefer_json:false,warmup_tables:Vec::new()}} }
+pub(super) fn data_error(message:String)->ConfigError{ConfigError::new(ErrorCode::InvalidValue,message)}
+#[derive(Clone)]
+pub struct LoadSettings{plan:LoadPlan,limits:ResourceLimits,source_namespace:String}
+impl LoadSettings{
+    pub fn new(plan:LoadPlan)->Self{Self{plan,limits:ResourceLimits::default(),source_namespace:String::new()}}
+    pub fn with_limits(mut self,limits:ResourceLimits)->Self{self.limits=limits;self}
+    pub fn with_source_namespace(mut self,value:impl Into<String>)->Self{self.source_namespace=value.into();self}
+    pub fn plan(&self)->&LoadPlan{&self.plan}
+    pub fn limits(&self)->&ResourceLimits{&self.limits}
+    pub fn source_namespace(&self)->&str{&self.source_namespace}
+}
+impl Default for LoadSettings{fn default()->Self{Self::new(LoadPlan::default())}}
+pub(super) struct SourceBundle<'a>{source:&'a dyn ConfigSource,cancellation:&'a Cancellation,metadata:Bundle,pub(super) budget:Arc<LoadBudget>,pub(super) digest:String}
+impl<'a> SourceBundle<'a>{
+    pub(super) fn open(source:&'a dyn ConfigSource,settings:&LoadSettings,cancellation:&'a Cancellation)->ServerResult<Self>{
+        cancellation.check()?;let limits=settings.limits.clone();let budget=Arc::new(LoadBudget::new(limits.clone()));
+        let maximum=limits.max_manifest_bytes.min(limits.max_bundle_bytes);let bytes=source.read("current.json",maximum,cancellation).map_err(|e|e.locate("read","","","","","current.json"))?;cancellation.check()?;
+        if bytes.len()as u64>maximum{return Err(LoadBudget::limit());}budget.read(bytes.len())?;
+        let text=std::str::from_utf8(&bytes).map_err(|e|ConfigError::new(ErrorCode::InvalidEncoding,e.to_string()))?;
+        let manifest=limited_decode(&limits,||parse_json_scoped(text,Some(&JsonAllocationBounds::manifest(&limits)))).map_err(|mut e|{if e.code==ErrorCode::InvalidValue{e.code=ErrorCode::InvalidManifest;}e})?;
+        let format=manifest.field("format").and_then(Json::string).map_err(|e|ConfigError::new(ErrorCode::InvalidManifest,e))?;
+        if format.is_empty(){return Err(ConfigError::new(ErrorCode::InvalidManifest,"Empty manifest format"));}
+        if !matches!(format,"ZrConfig.Binary/1"|"ZrConfig.Json/1"|"ZrConfig.Mixed/1"){return Err(ConfigError::new(ErrorCode::UnsupportedFormat,"Unknown manifest format"));}
+        if manifest.field("tables").and_then(Json::array).map_err(|e|ConfigError::new(ErrorCode::InvalidManifest,e))?.len()>limits.max_tables{return Err(LoadBudget::limit());}
+        let metadata=Bundle::from_manifest(Path::new(""),&manifest).map_err(|e|ConfigError::new(ErrorCode::InvalidManifest,e))?;
+        Ok(Self{source,cancellation,metadata,budget,digest:sha256(&bytes)})
+    }
+    pub(super) fn version(&self)->&str{&self.metadata.version}
+    pub(super) fn validate_catalog(&self,catalog:&Catalog)->ServerResult<()>{self.metadata.validate_catalog(catalog)}
+    fn read(&self,file:&str)->ServerResult<Vec<u8>>{
+        self.cancellation.check()?;let maximum=self.budget.read_limit()?;let path=format!("versions/{}/{}",self.metadata.version,file);
+        let table=file.rsplit_once('.').map_or(file,|(name,_)|name);let bytes=self.source.read(&path,maximum,self.cancellation).map_err(|e|e.locate("read",&self.metadata.version,table,"","",&path))?;self.cancellation.check()?;if bytes.len()as u64>maximum{return Err(LoadBudget::limit());}self.budget.read(bytes.len())?;Ok(bytes)
+    }
+}
+fn append_json(output:&mut String,value:&Json){
+    match value {
+        Json::Null=>output.push_str("null"),Json::Bool(v)=>output.push_str(if *v{"true"}else{"false"}),Json::Number(v)=>output.push_str(v),
+        Json::String(v)=>{output.push('"');for c in v.chars(){match c{'"'|'\\'=>{output.push('\\');output.push(c)},c if c<' '=>{let hex=b"0123456789abcdef";output.push_str("\\u00");output.push(hex[(c as usize)>>4]as char);output.push(hex[(c as usize)&15]as char)},_=>output.push(c)}}output.push('"')},
+        Json::Array(values)=>{output.push('[');for(i,value)in values.iter().enumerate(){if i!=0{output.push(',')}append_json(output,value)}output.push(']')},
+        Json::Object(values)=>{output.push('{');for(i,(key,value))in values.iter().enumerate(){if i!=0{output.push(',')}append_json(output,&Json::String(key.clone()));output.push(':');append_json(output,value)}output.push('}')},
+    }
+}
+pub(super) struct IndexedRows {
+    index_raw_bytes:u64,
+    version:String,relative_path:String,
+    wire:std::sync::Mutex<Wire>,
+    json_bounds:JsonAllocationBounds,
+    schema:Arc<Json>,
+    pub(super) budget:Arc<LoadBudget>,
+    bytes:Vec<u8>,fragments:Option<Vec<String>>,offsets:Vec<(usize,usize)>,ids:Vec<i32>,keys:Vec<Json>,references:std::sync::Arc<HashMap<i32,usize>>,
+    reference_directory:std::sync::OnceLock<std::sync::Arc<HashMap<String,std::sync::Arc<HashMap<i32,usize>>>>>,
+}
+impl IndexedRows {
+    pub(super) fn open(bundle:&SourceBundle<'_>,schema:&str,prefer_json:bool)->ServerResult<Self>{
+        let wire=Wire::new(schema).map_err(data_error)?;
+        let name=wire.schema.field("name").and_then(Json::string).map_err(data_error)?;
+        let entry=bundle.metadata.entries.get(name).ok_or_else(||ConfigError::new(ErrorCode::SchemaMismatch,"Missing table"))?;
+        if entry.field("schemaHash").and_then(Json::string).map_err(data_error)?!=wire.schema.field("hash").and_then(Json::string).map_err(data_error)?{return Err(ConfigError::new(ErrorCode::SchemaMismatch,"Schema mismatch"))}
+        let declared=scalar::<u32>(entry.field("rows").map_err(data_error)?).map_err(data_error)?as usize;bundle.budget.rows(declared)?;
+        let alternate=prefer_json&&bundle.metadata.format=="ZrConfig.Mixed/1";
+        let file=entry.field(if alternate{"jsonFile"}else{"file"}).and_then(Json::string).map_err(data_error)?;
+        let bytes=bundle.read(file)?;
+        let expected=entry.field(if alternate{"jsonSha256"}else{"sha256"}).and_then(Json::string).and_then(hash).map_err(data_error)?;
+        if sha256(&bytes)!=expected{return Err(ConfigError::new(ErrorCode::IntegrityMismatch,"Table digest mismatch"))}
+        let mut result=limited_decode(&bundle.budget.limits,||Self::new(wire,bytes,bundle.metadata.format=="ZrConfig.Json/1"||alternate,bundle.budget.clone()))?;
+        result.version=bundle.version().to_owned();result.relative_path=format!("versions/{}/{}",bundle.version(),file);
+        if result.count()!=declared{return Err(ConfigError::new(ErrorCode::InvalidValue,"Row count mismatch"))}
+        let raw=if let Some(fragments)=&result.fragments{fragments.iter().map(|s|s.len()as u64).sum()}else{result.bytes.len()as u64};bundle.budget.state()?.raw+=raw;
+        Ok(result)
+    }
+    fn new(mut wire:Wire,mut bytes:Vec<u8>,json:bool,budget:Arc<LoadBudget>)->Result<Self>{
+        let json_bounds=JsonAllocationBounds::new(&wire.schema,&budget.limits)?;
+        let mut keys=Vec::new();let mut ids=Vec::new();let mut offsets=Vec::new();let mut fragments=None;
+        if json{
+            let document=parse_json_scoped(std::str::from_utf8(&bytes).map_err(decode_utf8)?,Some(&json_bounds))?;
+            if document.object_len()?!=4||document.field("format")?.string()?!="ZrConfig.TableJson/1"||document.field("table")?.string()?!=wire.schema.field("name")?.string()?||document.field("schemaHash")?.string()?!=wire.schema.field("hash")?.string()?{return invalid("JSON header mismatch")}
+            let rows=document.field("rows")?.array()?;if rows.len()>5000000{return invalid("Too many rows")}
+            let mut encoded=Vec::with_capacity(rows.len());
+            for row in rows{
+                let mut key=BTreeMap::new();wire.remaining.set(decode_elements());
+                for name in wire.schema.field("keys")?.array()?{let name=name.string()?;let field=wire.schema.field("fields")?.array()?.iter().find(|f|f.field("name").and_then(Json::string).ok()==Some(name)).ok_or("Unknown key")?;wire.validate(field.field("type")?.string()?,row.field(name)?,0)?;key.insert(name.to_owned(),row.field(name)?.clone());}
+                keys.push(Json::Object(key));ids.push(if wire.schema.field("hasId")?.boolean()?{scalar::<i32>(row.field("Id")?)?}else{0});let mut fragment=String::new();append_json(&mut fragment,row);encoded.push(fragment);
+            }
+            fragments=Some(encoded);bytes=Vec::new();
+        }else{
+            let mut cursor=Cursor{bytes:&bytes,pos:0};if cursor.i32()?!=0x4643525a||cursor.i32()?!=4||cursor.string()?!=wire.schema.field("name")?.string()?||cursor.string()?!=wire.schema.field("hash")?.string()?{return invalid("Binary header mismatch")}
+            let count=cursor.count(5000000)?;if count>(bytes.len()-cursor.pos)/12{return invalid("Truncated row index")}
+            let tags=cursor.count(wire.schema.field("tags")?.array()?.len())?;let mut seen=HashSet::new();
+            for _ in 0..tags{let tag=cursor.string()?;if !contains(wire.schema.field("tags")?,&tag)?||!seen.insert(tag.clone()){return invalid("Invalid type directory")};Arc::make_mut(&mut wire.tags).push(tag);}
+            let mut end=0usize;
+            for _ in 0..count{
+                wire.remaining.set(decode_elements());let mut key=BTreeMap::new();for name in wire.schema.field("keys")?.array()?{let name=name.string()?;let field=wire.schema.field("fields")?.array()?.iter().find(|f|f.field("name").and_then(Json::string).ok()==Some(name)).ok_or("Unknown key")?;key.insert(name.to_owned(),wire.read_value(field.field("type")?.string()?,&mut cursor,0)?);}
+                keys.push(Json::Object(key));ids.push(cursor.i32()?);let offset=cursor.count(i32::MAX as usize)?;let length=cursor.count(i32::MAX as usize)?;if offset!=end{return invalid("Invalid row bounds")};end=end.checked_add(length).ok_or("Row bounds overflow")?;offsets.push((offset,length));
+            }
+            if cursor.pos.checked_add(end)!=Some(bytes.len()){return invalid("Payload size mismatch")};for(offset,_)in &mut offsets{*offset+=cursor.pos;}
+        }
+        let mut references=HashMap::new();if wire.schema.field("hasId")?.boolean()?{for(i,id)in ids.iter().enumerate(){references.entry(*id).and_modify(|v|*v=usize::MAX).or_insert(i);}}
+        let index_raw_bytes=bytes.len()as u64+fragments.as_ref().map_or(0,|parts|parts.iter().map(|s|s.len()as u64).sum::<u64>());let schema=wire.schema.clone();Ok(Self{index_raw_bytes,version:String::new(),relative_path:String::new(),wire:std::sync::Mutex::new(wire),json_bounds,schema,budget,bytes,fragments,offsets,ids,keys,references:std::sync::Arc::new(references),reference_directory:std::sync::OnceLock::new()})
+    }
+    pub(super) fn reference_keys(&self)->std::sync::Arc<HashMap<i32,usize>>{self.references.clone()}
+    pub(super) fn bind_references(&self,directory:std::sync::Arc<HashMap<String,std::sync::Arc<HashMap<i32,usize>>>>){let _=self.reference_directory.set(directory);}
+    pub(super) fn count(&self)->usize{self.ids.len()}
+    pub(super) fn key(&self,index:usize)->&Json{&self.keys[index]}
+    pub(super) fn reference(&self,id:i32)->ServerResult<usize>{self.references.get(&id).copied().filter(|i|*i!=usize::MAX).ok_or_else(||ConfigError::new(ErrorCode::MissingReference,"Missing or ambiguous reference"))}
+    fn estimated_row_bytes(&self,index:usize)->u64{let raw=if let Some(parts)=&self.fragments{parts[index].len()}else{self.offsets[index].1};(raw as u64).saturating_mul(4).saturating_add(128)}
+    pub(super) fn estimated_index_bytes(&self,fields:usize)->u64{256+512*self.count()as u64*fields.max(1)as u64+8*self.index_raw_bytes}
+    pub(super) fn read_transient(&self,index:usize)->ServerResult<Json>{let _permit=self.budget.reserve_decode(self.estimated_row_bytes(index),true)?;self.read(index)}
+    pub(super) fn read(&self,index:usize)->ServerResult<Json>{
+        self.read_value(index).map_err(|error|{let mut key=String::new();append_json(&mut key,&self.keys[index]);error.locate("row",&self.version,self.schema.field("name").and_then(Json::string).unwrap_or(""),&key,"",&self.relative_path)})
+    }
+    fn read_value(&self,index:usize)->ServerResult<Json>{
+        let decode=||->Result<Json>{
+            let wire=self.wire.lock().map_err(|e|e.to_string())?.clone();wire.remaining.set(decode_elements());
+            let row=if let Some(fragments)=&self.fragments{parse_json_scoped(&fragments[index],Some(&self.json_bounds))?}else{let(offset,length)=self.offsets[index];let mut cursor=Cursor{bytes:&self.bytes[offset..offset+length],pos:0};let row=wire.read_fields(wire.schema.field("fields")?,&mut cursor,0)?;if cursor.pos!=length{return invalid("Row boundary mismatch")};row};
+            wire.remaining.set(decode_elements());wire.validate_fields(wire.schema.field("fields")?,&row,0,false)?;
+            if let Json::Object(keys)=&self.keys[index]{for(name,value)in keys{if !same_scalar(row.field(name)?,value){return invalid("Row key differs from index")}}}
+            if self.ids[index]!=if self.schema.field("hasId")?.boolean()?{scalar::<i32>(row.field("Id")?)?}else{0}{return invalid("Row Id differs from index")}
+            Ok(row)
+        };let row=limited_decode(&self.budget.limits,decode)?;
+        if let Some(directory)=self.reference_directory.get(){self.validate_references(&row,|name,id|{if directory.get(name).and_then(|keys|keys.get(&id)).filter(|index|**index!=usize::MAX).is_some(){Ok(())}else{Err(ConfigError::new(ErrorCode::MissingReference,"Missing or ambiguous reference"))}})?;}
+        Ok(row)
+    }
+    pub(super) fn validate_references(&self,row:&Json,resolve:impl Fn(&str,i32)->ServerResult<()>)->ServerResult<()>{
+        self.validate_references_shared(row,&resolve)
+    }
+    #[inline(never)]
+    fn validate_references_shared(&self,row:&Json,resolve:&dyn Fn(&str,i32)->ServerResult<()>)->ServerResult<()>{
+        for field in self.schema.field("fields").and_then(Json::array).map_err(data_error)?{
+            let id=field.field("type").and_then(Json::string).map_err(data_error)?;
+            let types=self.schema.field("types").and_then(Json::array).map_err(data_error)?;
+            let t=types.iter().find(|t|t.field("id").and_then(Json::string).ok()==Some(id)).ok_or_else(||ConfigError::new(ErrorCode::InvalidValue,"Unknown field type"))?;
+            if t.field("kind").and_then(Json::string).map_err(data_error)?=="tablereference"{
+                let name=field.field("name").and_then(Json::string).map_err(data_error)?;let id=scalar::<i32>(row.field(name).map_err(data_error)?).map_err(data_error)?;
+                if id!=0{resolve(t.field("referenceTable").and_then(Json::string).map_err(data_error)?,id).map_err(|error|error.locate("reference",&self.version,self.schema.field("name").and_then(Json::string).unwrap_or(""),"",name,&self.relative_path))?;}
+            }
+        }Ok(())
+    }
+}
+// Cold scheduling is shared across value types to bound compiler monomorphization.
+// Callbacks borrow the typed OnceLock on the stack; hot queries never dispatch through them.
+// No row ownership leaves the typed slots, and completion carries only success or an error.
+struct DerivedWork{state:std::sync::Mutex<(bool,Option<ConfigError>)>,done:std::sync::Condvar}
+impl DerivedWork{
+    fn new()->Self{Self{state:std::sync::Mutex::new((false,None)),done:std::sync::Condvar::new()}}
+    fn error(&self)->ConfigError{let state=self.state.lock().unwrap_or_else(|e|e.into_inner());state.1.clone().unwrap_or_else(||ConfigError::new(ErrorCode::TableNotLoaded,"Load the group index explicitly"))}
+    #[inline(never)]
+    fn load(&self,token:&Cancellation,budget:&Arc<LoadBudget>,ready:&dyn Fn()->bool,action:&mut dyn FnMut()->ServerResult<()>)->ServerResult<()>{
+        token.check()?;if ready(){return Ok(())}
+        let mut state=self.state.lock().unwrap_or_else(|e|e.into_inner());let mut waiting=None;
+        loop{token.check()?;if ready(){return Ok(())}if let Some(error)=&state.1{return Err(error.clone())}if !state.0{break}if waiting.is_none(){waiting=Some(budget.request(false)?)}state=self.done.wait_timeout(state,std::time::Duration::from_millis(10)).unwrap_or_else(|e|e.into_inner()).0;}
+        drop(waiting);let _permit=budget.request(true)?;state.0=true;drop(state);
+        // A panic must release admission and wake every waiter before it resumes.
+        let result=std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+        let mut state=self.state.lock().unwrap_or_else(|e|e.into_inner());state.0=false;
+        let error=match result{Ok(Ok(()))=>None,Ok(Err(error))=>{if terminal_row_error(&error){state.1=Some(error.clone());budget.state.lock().unwrap_or_else(|e|e.into_inner()).index_faults+=1;}Some(error)},Err(panic)=>{drop(state);self.done.notify_all();std::panic::resume_unwind(panic)}};
+        drop(state);self.done.notify_all();token.check()?;if let Some(error)=error{return Err(error)}Ok(())
+    }
+}
+pub(super) struct DerivedValue<T>{ready:std::sync::OnceLock<T>,work:DerivedWork}
+impl<T> DerivedValue<T>{
+    pub(super) fn new()->Self{Self{ready:std::sync::OnceLock::new(),work:DerivedWork::new()}}
+    pub(super) fn get(&self)->ServerResult<&T>{self.ready.get().ok_or_else(||self.work.error())}
+    #[inline(never)]
+    pub(super) fn load(&self,token:&Cancellation,budget:&Arc<LoadBudget>,estimate:u64,factory:impl FnOnce()->ServerResult<(T,u64)>)->ServerResult<&T>{
+        token.check()?;if let Some(value)=self.ready.get(){return Ok(value)}
+        let mut factory=Some(factory);
+        self.work.load(token,budget,&||self.ready.get().is_some(),&mut ||{
+            let mut permit=budget.reserve_index(estimate)?;
+            let (value,retained)=factory.take().expect("Index factory runs once")()?;
+            permit.commit(retained)?;let _=self.ready.set(value);Ok(())
+        })?;self.get()
+    }
+}
+struct RowWork{result:std::sync::Mutex<Option<ServerResult<()>>>,done:std::sync::Condvar}
+struct RowTasks{pending:HashMap<usize,Arc<RowWork>>,failures:HashMap<usize,ConfigError>}
+struct RowSchedule{tasks:std::sync::Mutex<RowTasks>}
+impl RowSchedule{
+    fn new()->Self{Self{tasks:std::sync::Mutex::new(RowTasks{pending:HashMap::new(),failures:HashMap::new()})}}
+    fn error(&self,index:usize)->ConfigError{match self.tasks.lock(){Ok(tasks)=>tasks.failures.get(&index).cloned().unwrap_or_else(||ConfigError::new(ErrorCode::RowNotLoaded,"Load the row explicitly")),Err(error)=>ConfigError::new(ErrorCode::InternalError,error.to_string())}}
+    #[inline(never)]
+    fn load(&self,index:usize,cancellation:&Cancellation,budget:&Arc<LoadBudget>,ready:&dyn Fn()->bool,action:&mut dyn FnMut()->ServerResult<()>)->ServerResult<()>{
+        let(work,owner,_request)={let mut tasks=self.tasks.lock().map_err(|e|ConfigError::new(ErrorCode::InternalError,e.to_string()))?;
+            if ready(){return Ok(())}if let Some(error)=tasks.failures.get(&index){return Err(error.clone())}
+            if let Some(work)=tasks.pending.get(&index){(work.clone(),false,budget.request(false)?)}else{let request=budget.request(true)?;let work=Arc::new(RowWork{result:std::sync::Mutex::new(None),done:std::sync::Condvar::new()});tasks.pending.insert(index,work.clone());(work,true,request)}};
+        if owner{
+            let decoded=std::panic::catch_unwind(std::panic::AssertUnwindSafe(action));
+            let result=match &decoded{Ok(result)=>result.clone(),Err(_)=>Err(ConfigError::new(ErrorCode::InternalError,"Decoder panicked"))};
+            {let mut tasks=self.tasks.lock().unwrap_or_else(|e|e.into_inner());if decoded.is_ok(){if let Err(error)=&result{if terminal_row_error(error){tasks.failures.insert(index,error.clone());budget.state.lock().unwrap_or_else(|e|e.into_inner()).faults+=1;}}}tasks.pending.remove(&index);}
+            *work.result.lock().unwrap_or_else(|e|e.into_inner())=Some(result);work.done.notify_all();
+            if let Err(panic)=decoded{std::panic::resume_unwind(panic)}
+        }
+        let mut result=work.result.lock().map_err(|e|ConfigError::new(ErrorCode::InternalError,e.to_string()))?;
+        loop{cancellation.check()?;if let Some(result)=&*result{return result.clone()};result=work.done.wait_timeout(result,std::time::Duration::from_millis(10)).map_err(|e|ConfigError::new(ErrorCode::InternalError,e.to_string()))?.0;}
+    }
+}
+pub(super) struct RowStorage<T>{
+    pub(super) indexed:IndexedRows,decode:fn(&Json)->Result<T>,ready:Vec<std::sync::OnceLock<Arc<T>>>,schedule:RowSchedule,loaded:std::sync::atomic::AtomicUsize,
+}
+impl<T> RowStorage<T>{
+    #[inline(never)]
+    pub(super) fn new(indexed:IndexedRows,decode:fn(&Json)->Result<T>)->Self{let ready=(0..indexed.count()).map(|_|std::sync::OnceLock::new()).collect();Self{indexed,decode,ready,schedule:RowSchedule::new(),loaded:std::sync::atomic::AtomicUsize::new(0)}}
+    pub(super) fn count(&self)->usize{self.ready.len()}
+    pub(super) fn loaded_count(&self)->usize{self.loaded.load(std::sync::atomic::Ordering::Relaxed)}
+    pub(super) fn cached(&self,index:usize)->Option<&T>{self.ready[index].get().map(AsRef::as_ref)}
+    pub(super) fn get(&self,index:usize)->ServerResult<Arc<T>>{
+        let slot=self.ready.get(index).ok_or_else(||ConfigError::new(ErrorCode::KeyNotFound,"Row index not found"))?;
+        slot.get().cloned().ok_or_else(||self.schedule.error(index))
+    }
+    #[inline(never)]
+    pub(super) fn load(&self,index:usize,cancellation:&Cancellation)->ServerResult<Arc<T>>{
+        cancellation.check()?;let slot=self.ready.get(index).ok_or_else(||ConfigError::new(ErrorCode::KeyNotFound,"Row index not found"))?;if let Some(row)=slot.get(){return Ok(row.clone())}
+        self.schedule.load(index,cancellation,&self.indexed.budget,&||slot.get().is_some(),&mut ||{
+            let mut permit=self.indexed.budget.reserve(self.indexed.estimated_row_bytes(index))?;
+            let row=self.indexed.read(index).and_then(|v|(self.decode)(&v).map(Arc::new).map_err(data_error))?;
+            permit.committed=true;if slot.set(row).is_ok(){self.loaded.fetch_add(1,std::sync::atomic::Ordering::Relaxed);}Ok(())
+        })?;slot.get().cloned().ok_or_else(||ConfigError::new(ErrorCode::InternalError,"Row completed without a value"))
+    }
+}
+pub struct DataGroup<S,T>{pub(super) snapshot:Arc<S>,pub(super) positions:Arc<[usize]>,pub(super) query:fn(&S,usize)->ServerResult<Arc<T>>}
+impl<S,T>Clone for DataGroup<S,T>{fn clone(&self)->Self{Self{snapshot:self.snapshot.clone(),positions:self.positions.clone(),query:self.query}}}
+impl<S,T>DataGroup<S,T>{
+    pub fn len(&self)->usize{self.positions.len()}
+    pub fn is_empty(&self)->bool{self.positions.is_empty()}
+    pub fn at(&self,index:usize)->ServerResult<RowHandle<S,T>>{let ordinal=self.positions.get(index).ok_or_else(||ConfigError::new(ErrorCode::KeyNotFound,"Group index out of range"))?;Ok(RowHandle{snapshot:self.snapshot.clone(),row:(self.query)(&self.snapshot,*ordinal)?})}
+}
+fn contains(values: &Json, key: &str) -> Result<bool> {
+    Ok(values.array()?.iter().any(|v| v.string().ok() == Some(key)))
+}
+fn same_scalar(a: &Json, b: &Json) -> bool {
+    match (a, b) {
+        (Json::String(a), Json::String(b)) | (Json::Number(a), Json::Number(b)) => a == b,
+        (Json::Bool(a), Json::Bool(b)) => a == b,
+        _ => false,
+    }
+}
+// SHA-256 校验完整性；不将哈希当作签名或身份认证。
+pub fn sha256(bytes: &[u8]) -> String {
+    const K: [u32; 64] = [
+        0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4,
+        0xab1c5ed5, 0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe,
+        0x9bdc06a7, 0xc19bf174, 0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f,
+        0x4a7484aa, 0x5cb0a9dc, 0x76f988da, 0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7,
+        0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967, 0x27b70a85, 0x2e1b2138, 0x4d2c6dfc,
+        0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85, 0xa2bfe8a1, 0xa81a664b,
+        0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070, 0x19a4c116,
+        0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+        0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7,
+        0xc67178f2,
+    ];
+    let mut data = bytes.to_vec();
+    data.push(128);
+    while data.len() % 64 != 56 {
+        data.push(0);
+    }
+    data.extend_from_slice(&(bytes.len() as u64 * 8).to_be_bytes());
+    let mut h = [
+        0x6a09e667u32,
+        0xbb67ae85,
+        0x3c6ef372,
+        0xa54ff53a,
+        0x510e527f,
+        0x9b05688c,
+        0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    for block in data.chunks_exact(64) {
+        let mut w = [0u32; 64];
+        for i in 0..16 {
+            w[i] = u32::from_be_bytes(block[i * 4..i * 4 + 4].try_into().unwrap());
+        }
+        for i in 16..64 {
+            let x = w[i - 15];
+            let y = w[i - 2];
+            w[i] = w[i - 16]
+                .wrapping_add(x.rotate_right(7) ^ x.rotate_right(18) ^ (x >> 3))
+                .wrapping_add(w[i - 7])
+                .wrapping_add(y.rotate_right(17) ^ y.rotate_right(19) ^ (y >> 10));
+        }
+        let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut j] = h;
+        for i in 0..64 {
+            let t1 = j
+                .wrapping_add(e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25))
+                .wrapping_add((e & f) ^ (!e & g))
+                .wrapping_add(K[i])
+                .wrapping_add(w[i]);
+            let t2 = (a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22))
+                .wrapping_add((a & b) ^ (a & c) ^ (b & c));
+            j = g;
+            g = f;
+            f = e;
+            e = d.wrapping_add(t1);
+            d = c;
+            c = b;
+            b = a;
+            a = t1.wrapping_add(t2);
+        }
+        for (i, v) in [a, b, c, d, e, f, g, j].iter().enumerate() {
+            h[i] = h[i].wrapping_add(*v);
+        }
+    }
+    use std::fmt::Write;
+    let mut result = String::with_capacity(64);
+    for x in h {
+        write!(result, "{x:08x}").unwrap();
+    }
+    result
+}
+fn segment(v: &str) -> Result<&str> {
+    if v.is_empty()
+        || v == "."
+        || v == ".."
+        || v.bytes()
+            .any(|b| b < 32 || matches!(b, b'/' | b'\\' | b':'))
+    {
+        return invalid("路径无效");
+    }
+    Ok(v)
+}
+fn hash(v: &str) -> Result<String> {
+    if v.len() != 64 || !v.bytes().all(|b| b.is_ascii_hexdigit()) {
+        return invalid("SHA-256 无效");
+    }
+    Ok(v.to_ascii_lowercase())
+}
+pub struct Bundle {
+    target:String,
+    root: PathBuf,
+    pub version: String,
+    format: String,
+    entries: HashMap<String, Json>,
+}
+impl Bundle {
+    pub(super) fn validate_catalog(&self, catalog: &Catalog) -> ServerResult<()> {
+        if !catalog.target.is_empty()&&catalog.target!=self.target{return Err(ConfigError::new(ErrorCode::CatalogMismatch,"Manifest target differs from catalog"))}
+        if self.entries.len() != catalog.tables.len() { return Err(ConfigError::new(ErrorCode::TableSetMismatch,"Manifest table set differs from catalog")); }
+        for table in &catalog.tables {
+            let entry = self.entries.get(&table.name).ok_or_else(||ConfigError::new(ErrorCode::TableSetMismatch,"Missing catalog table"))?;
+            let schema = entry.field("schemaHash").and_then(Json::string).map_err(|message|ConfigError::new(ErrorCode::InvalidManifest,message))?;
+            if schema != table.schema_hash { return Err(ConfigError::new(ErrorCode::SchemaMismatch,format!("Schema mismatch: {}",table.name))); }
+        }
+        Ok(())
+    }
+    pub fn open(root: &Path) -> Result<Self> {
+        let manifest = parse_json(&std::fs::read_to_string(root.join("current.json")).map_err(|e| e.to_string())?)?;
+        Self::from_manifest(root,&manifest)
+    }
+    fn from_manifest(root:&Path,manifest:&Json)->Result<Self>{
+        let format = manifest.field("format")?.string()?;
+        if !matches!(
+            format,
+            "ZrConfig.Binary/1" | "ZrConfig.Json/1" | "ZrConfig.Mixed/1"
+        ) {
+            return invalid("清单格式无效");
+        }
+        let version = segment(manifest.field("versionId")?.string()?)?.to_owned();
+        let mut entries = HashMap::new();
+        for entry in manifest.field("tables")?.array()? {
+            let name = segment(entry.field("name")?.string()?)?;
+            if entries.contains_key(name) {
+                return invalid("表重复");
+            }
+            if entry.field("file")?.string()?
+                != format!(
+                    "{name}{}",
+                    if format == "ZrConfig.Json/1" {
+                        ".json"
+                    } else {
+                        ".bytes"
+                    }
+                )
+            {
+                return invalid("表文件名无效");
+            }
+            hash(entry.field("sha256")?.string()?)?;
+            hash(entry.field("schemaHash")?.string()?)?;
+            if scalar::<u32>(entry.field("rows")?)? > 5000000 {
+                return invalid("行数过大");
+            }
+            if format == "ZrConfig.Mixed/1" {
+                if entry.field("jsonFile")?.string()? != format!("{name}.json") {
+                    return invalid("JSON 文件名无效");
+                }
+                hash(entry.field("jsonSha256")?.string()?)?;
+            } else {
+                for field in ["jsonFile", "jsonSha256"] {
+                    if let Ok(v) = entry.field(field) {
+                        if !v.is_null() && v.string()? != "" {
+                            return invalid("格式与备用文件不一致");
+                        }
+                    }
+                }
+            }
+            entries.insert(name.to_owned(), entry.clone());
+        }
+        Ok(Self {
+            target:manifest.field("target").and_then(Json::string).unwrap_or("").to_owned(),
+            root: root.to_owned(),
+            version,
+            format: format.to_owned(),
+            entries,
+        })
+    }
+    pub(super) fn validate_tables(&self, expected: &[&str]) -> Result<()> {
+        if self.entries.len() != expected.len() || expected.iter().any(|name| !self.entries.contains_key(*name)) {
+            return invalid("清单表集合不匹配");
+        }
+        Ok(())
+    }
+    pub fn load(&self, schema: &str, prefer_json: bool) -> Result<Vec<Json>> {
+        let mut wire = Wire::new(schema)?;
+        let name = wire.schema.field("name")?.string()?;
+        let entry = self
+            .entries
+            .get(name)
+            .ok_or_else(|| format!("缺少表：{name}"))?;
+        if entry.field("schemaHash")?.string()? != wire.schema.field("hash")?.string()? {
+            return invalid("表结构不匹配");
+        }
+        let alternate = self.format == "ZrConfig.Mixed/1" && prefer_json;
+        let file = entry
+            .field(if alternate { "jsonFile" } else { "file" })?
+            .string()?;
+        let bytes = std::fs::read(self.root.join("versions").join(&self.version).join(file))
+            .map_err(|e| e.to_string())?;
+        if sha256(&bytes)
+            != hash(
+                entry
+                    .field(if alternate { "jsonSha256" } else { "sha256" })?
+                    .string()?,
+            )?
+        {
+            return invalid("文件完整性校验失败");
+        }
+        let rows = wire.read(&bytes, self.format == "ZrConfig.Json/1" || alternate)?;
+        if rows.len() != scalar::<u32>(entry.field("rows")?)? as usize {
+            return invalid("行数不匹配");
+        }
+        Ok(rows)
+    }
+}

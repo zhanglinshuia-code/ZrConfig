@@ -1,0 +1,11 @@
+{
+    "name": "ZrConfig.Validation",
+    "references": [
+        "ZrConfig.Runtime"
+    ],
+    "autoReferenced": true,
+    "noEngineReferences": true,
+    "includePlatforms": [
+        "Editor"
+    ]
+}

@@ -1,0 +1,6 @@
+<linker>
+    <assembly fullname="ZrConfig.Runtime">
+        <type fullname="ZrConfig.Runtime.ConfigManifest" preserve="all" />
+        <type fullname="ZrConfig.Runtime.ConfigManifestTable" preserve="all" />
+    </assembly>
+</linker>

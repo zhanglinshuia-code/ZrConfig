@@ -1,0 +1,17 @@
+<Project>
+    <ItemGroup Condition="'$(MSBuildProjectName)' == 'ZrConfig.App' Or '$(MSBuildProjectName)' == 'ZrConfig.Cli'">
+        <None Include="$(MSBuildThisFileDirectory)LICENSE" Link="LICENSE" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+        <None Include="$(MSBuildThisFileDirectory)src/ZrConfig.App/Licenses/ThirdPartyNotices.txt" Link="Licenses/ThirdPartyNotices.txt" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+        <None Include="$(MSBuildThisFileDirectory)src/ZrConfig.App/Licenses/ThirdPartyPackages.json" Link="Licenses/ThirdPartyPackages.json" CopyToOutputDirectory="PreserveNewest" CopyToPublishDirectory="PreserveNewest" />
+    </ItemGroup>
+    <!-- 工具不携带示例模块、项目规则和模型；清理旧版构建遗留的分发文件。 -->
+    <Target Name="RemoveBundledProjectSources" AfterTargets="Build;Publish" Condition="'$(MSBuildProjectName)' == 'ZrConfig.App' Or '$(MSBuildProjectName)' == 'ZrConfig.Cli'">
+        <RemoveDir Directories="$(TargetDir)Rules" />
+        <RemoveDir Directories="$(PublishDir)Rules" Condition="'$(PublishDir)' != ''" />
+        <ItemGroup>
+            <BundledProjectFiles Include="$(TargetDir)ZrConfig.Demo.*;$(TargetDir)ZrConfig.TestFixtures.*;$(TargetDir)ZrConfig.Models.*;$(TargetDir)ZrConfig.Validators.*" />
+            <BundledProjectFiles Include="$(PublishDir)ZrConfig.Demo.*;$(PublishDir)ZrConfig.TestFixtures.*;$(PublishDir)ZrConfig.Models.*;$(PublishDir)ZrConfig.Validators.*" Condition="'$(PublishDir)' != ''" />
+        </ItemGroup>
+        <Delete Files="@(BundledProjectFiles)" />
+    </Target>
+</Project>
