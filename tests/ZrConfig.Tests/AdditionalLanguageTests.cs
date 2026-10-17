@@ -4,23 +4,29 @@ using System.Text.Json;
 // 运行真实生成物；不能用动态字典替代强类型源码编译验收。
 internal static class AdditionalLanguageTests
 {
+    internal static (string? Node, string? Lua, string? Rust, string? TypeScript, string? Tsc) ResolveTools(bool required)
+    {
+        string? node=PortableExportTests.FindTool("ZRCONFIG_NODE",OperatingSystem.IsWindows()?"node.exe":"node");
+        string? lua=PortableExportTests.FindTool("ZRCONFIG_LUA",OperatingSystem.IsWindows()?"lua.exe":"lua");
+        string? rust=PortableExportTests.FindTool("ZRCONFIG_RUSTC",OperatingSystem.IsWindows()?"rustc.exe":"rustc");
+        string? ts=Environment.GetEnvironmentVariable("ZRCONFIG_TYPESCRIPT");
+        // A configured compiler API is authoritative, including when it is missing.
+        string? tsc=string.IsNullOrEmpty(ts)?PortableExportTests.FindTool("ZRCONFIG_TSC",OperatingSystem.IsWindows()?"tsc.cmd":"tsc"):null;
+        Console.WriteLine($"工具链 ZRCONFIG_TYPESCRIPT: {ts ?? "<未设置>"}; 文件存在={File.Exists(ts)}");
+        var missing=new List<string>();
+        if(node==null)missing.Add(PortableExportTests.MissingTool("ZRCONFIG_NODE","node"));
+        if(lua==null)missing.Add(PortableExportTests.MissingTool("ZRCONFIG_LUA","lua"));
+        if(rust==null)missing.Add(PortableExportTests.MissingTool("ZRCONFIG_RUSTC","rustc"));
+        if(!File.Exists(ts)&&tsc==null)missing.Add(PortableExportTests.MissingTool(string.IsNullOrEmpty(ts)?"ZRCONFIG_TSC":"ZRCONFIG_TYPESCRIPT","TypeScript"));
+        if(required&&missing.Count!=0)throw new InvalidOperationException("七语言验收缺少工具链："+string.Join("; ",missing));
+        return(node,lua,rust,ts,tsc);
+    }
+
     internal static async Task RunAsync(string generated, string output, string root, bool required,string[]? namespaceRoots=null)
     {
-        string? Find(string variable, string file)
-        {
-            string? value=Environment.GetEnvironmentVariable(variable);if(!string.IsNullOrEmpty(value)&&File.Exists(value))return value;
-            foreach(string path in (Environment.GetEnvironmentVariable("PATH")??"").Split(Path.PathSeparator))
-                if(File.Exists(Path.Combine(path,file)))return Path.Combine(path,file);
-            return null;
-        }
-        string? node=Find("ZRCONFIG_NODE",OperatingSystem.IsWindows()?"node.exe":"node");
-        string? lua=Find("ZRCONFIG_LUA",OperatingSystem.IsWindows()?"lua.exe":"lua");
-        string? rust=Find("ZRCONFIG_RUSTC",OperatingSystem.IsWindows()?"rustc.exe":"rustc");
-        string? ts=Environment.GetEnvironmentVariable("ZRCONFIG_TYPESCRIPT");
-        string? tsc=Find("ZRCONFIG_TSC",OperatingSystem.IsWindows()?"tsc.cmd":"tsc");
+        var (node,lua,rust,ts,tsc)=ResolveTools(required);
         if(node==null||lua==null||rust==null||(!File.Exists(ts)&&tsc==null))
         {
-            if(required)throw new InvalidOperationException("七语言验收需要 Node、TypeScript、Lua 5.4、Rust 1.70+；使用 ZRCONFIG_NODE/ZRCONFIG_TYPESCRIPT/ZRCONFIG_TSC/ZRCONFIG_LUA/ZRCONFIG_RUSTC 指定。");
             Console.WriteLine("跳过 Lua/TypeScript/Rust 实际运行：工具链不齐；--portable-native 强制要求全部工具链。");return;
         }
         if(namespaceRoots!=null)

@@ -222,7 +222,9 @@ internal static class ServerRuntimeBenchmarks
             }
             else{var version=await Execute(tool.Item2,[tool.Item3],root);builds.Add(new{language=tool.Item1,toolchain=version.Output.Trim()});}
         }
-        var tsVersion=await Execute(node,["-e","process.stdout.write(require(process.argv[1]).version)",Tool("ZRCONFIG_TYPESCRIPT","typescript")],root);builds.Add(new{language="typescript",toolchain=tsVersion.Output});
+        string? nativeTypeScript=string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ZRCONFIG_TYPESCRIPT"))?Environment.GetEnvironmentVariable("ZRCONFIG_TSC"):null;
+        if(string.IsNullOrEmpty(nativeTypeScript))nativeTypeScript=null;
+        var tsVersion=nativeTypeScript!=null?await Execute(nativeTypeScript,["--version"],root):await Execute(node,["-e","process.stdout.write(require(process.argv[1]).version)",Tool("ZRCONFIG_TYPESCRIPT","typescript")],root);builds.Add(new{language="typescript",toolchain=tsVersion.Output});
         async Task Build(string language,string exe,string[] args,string work){Console.WriteLine("benchmark build "+language+": started");var r=await Execute(exe,args,work);builds.Add(new{language,milliseconds=r.Milliseconds,peak_working_set_bytes=r.Peak});Console.WriteLine($"benchmark build {language}: {r.Milliseconds:F0} ms");}
         string javaSource=Path.Combine(root,"BenchmarkMain.java"),classes=Path.Combine(root,"classes");File.WriteAllText(javaSource,Consumer(Java,"java"));Directory.CreateDirectory(classes);
         // Large catalogs exceed the OS command-line byte limit before javac runs.
@@ -246,9 +248,12 @@ internal static class ServerRuntimeBenchmarks
         await Build("rust-consumer",rust,["--edition","2021","-O","--extern","zrconfig="+rustLibrary,rustSource,"-o",rustBinary],root);drivers.Add(new("rust",rustBinary,[],root));
         string tsRoot=Path.Combine(generated,"TypeScript"),compiler=Path.Combine(root,"compile.cjs");File.WriteAllText(compiler,TypeScriptCompiler);
         int? compilerHeap=TypeScriptCompilerHeap();
+        if(nativeTypeScript!=null&&compilerHeap.HasValue)throw new ArgumentException("ZRCONFIG_TYPESCRIPT_HEAP_MB applies only to the JavaScript TypeScript compiler.");
         string[] compilerOptions=compilerHeap.HasValue?["--max-old-space-size="+compilerHeap.Value.ToString(CultureInfo.InvariantCulture)]:[];
         builds.Add(new{language="typescript",compiler_heap_megabytes=compilerHeap,compiler_options=compilerOptions});
-        await Build("typescript",node,[..compilerOptions,compiler,Tool("ZRCONFIG_TYPESCRIPT","typescript"),tsRoot],root);string js=Path.Combine(root,"benchmark.cjs");File.WriteAllText(js,Consumer(TypeScript,"typescript"));drivers.Add(new("typescript",node,["--expose-gc",js,tsRoot],root));
+        if(nativeTypeScript!=null)await Build("typescript",nativeTypeScript,["-p",tsRoot],root);
+        else await Build("typescript",node,[..compilerOptions,compiler,Tool("ZRCONFIG_TYPESCRIPT","typescript"),tsRoot],root);
+        string js=Path.Combine(root,"benchmark.cjs");File.WriteAllText(js,Consumer(TypeScript,"typescript"));drivers.Add(new("typescript",node,["--expose-gc",js,tsRoot],root));
         string luaSource=Path.Combine(root,"benchmark.lua");File.WriteAllText(luaSource,Consumer(Lua,"lua"));drivers.Add(new("lua",lua,[luaSource,Path.Combine(generated,"Lua")],root));
         long Size(string path)=>Directory.Exists(path)?Directory.GetFiles(path,"*",SearchOption.AllDirectories).Sum(f=>new FileInfo(f).Length):new FileInfo(path).Length;
         builds.Add(new{language="java",artifact_bytes=Size(classes)});builds.Add(new{language="go",artifact_bytes=Size(goBinary)});
@@ -325,8 +330,17 @@ func TestBenchmarkProcess(t *testing.T){args:=os.Args;for i,a:=range args{if a==
 #include <cstdlib>
 #include <new>
 static std::atomic<std::size_t> allocations{0};
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void* operator new(std::size_t n){allocations.fetch_add(1,std::memory_order_relaxed);if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+// Keep replacement allocation/deallocation boundaries visible to GCC.
+#if defined(__GNUC__)
+__attribute__((noinline))
+#endif
 void operator delete(void* p)noexcept{std::free(p);}void* operator new[](std::size_t n){return ::operator new(n);}void operator delete[](void* p)noexcept{::operator delete(p);}
+void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
+void operator delete[](void* p,std::size_t)noexcept{::operator delete[](p);}
 using namespace zrconfig;using Clock=std::chrono::steady_clock;double ms(Clock::time_point t){return std::chrono::duration<double,std::milli>(Clock::now()-t).count();}volatile std::int64_t sink;
 int main(int,char** a){int n=std::stoi(a[5]),count=n*std::stoi(a[4])/100;std::string mode=a[3];LoadPlan plan;plan.prefer_json=std::string(a[2])=="json";plan.mode=mode=="full"?LoadMode::ServerDefault:mode=="selected"?LoadMode::SelectedTables:mode=="strict"?LoadMode::LazyRowsStrict:LoadMode::LazyRowsOnAccess;if(mode!="full")plan.tables=std::vector<std::string>{"Bench"};Cancellation token;std::vector<std::shared_ptr<const data::Snapshot>> retained;for(int j=0;j<std::stoi(a[6]);++j)retained.push_back(data::Snapshot::load(a[1],plan,token));auto t=Clock::now();auto s=data::Snapshot::load(a[1],plan,token);double cold=ms(t);t=Clock::now();s->load_Bench(1,token);double first=ms(t);t=Clock::now();std::int64_t sum=0;for(int i=0;i<count;i++)sum+=s->load_Bench(i*7919%count+1,token).Id();double access=ms(t);auto sparse=s->loaded_row_count();t=Clock::now();sum+=s->load_group_Bench_ByGroup(0,token).size();double group=ms(t);for(int i=0;i<20000;i++)sum+=s->get_Bench(i%count+1).Id();std::vector<double> samples(1000);auto before=allocations.load();for(int b=0;b<1000;b++){t=Clock::now();for(int i=0;i<100;i++)sum+=s->get_Bench((b*100+i)%count+1).Id();samples[b]=ms(t)*1e6/100;}auto hot_allocs=allocations.load()-before;std::sort(samples.begin(),samples.end());auto diagnostic=s->diagnostics();t=Clock::now();s.reset();retained.clear();double release=ms(t);sink=sum;std::cout<<"{\"cold_ms\":"<<cold<<",\"first_row_ms\":"<<first<<",\"access_ms\":"<<access<<",\"group_ms\":"<<group<<",\"sparse_loaded_rows\":"<<sparse<<",\"hot_p50_ns\":"<<samples[500]<<",\"hot_p95_ns\":"<<samples[950]<<",\"hot_p99_ns\":"<<samples[990]<<",\"release_ms\":"<<release<<",\"retained_raw_bytes\":"<<diagnostic.retained_raw_bytes<<",\"hot_allocs\":"<<hot_allocs<<",\"checksum\":"<<sum<<"}\n";}
 """;

@@ -15,6 +15,12 @@ internal static class PortableExportTests
 {
     internal static async Task RunAsync(string parent, bool requireNative = false)
     {
+        CheckToolResolution(parent);
+        if (requireNative)
+        {
+            ResolveNativeTools(true);
+            AdditionalLanguageTests.ResolveTools(true);
+        }
         string root = Path.Combine(parent, "portable");
         string data = Path.Combine(root, "Data"), code = Path.Combine(root, "Config"), output = Path.Combine(root, "Output");
         Directory.CreateDirectory(data); Directory.CreateDirectory(code);
@@ -216,6 +222,62 @@ internal static class PortableExportTests
     private static void Check(bool ok,string message){if(!ok)throw new InvalidOperationException(message);}
     private static void Reject(Action action){try{action();}catch(Exception){return;}throw new InvalidOperationException("错误输入未拒绝。");}
 
+    internal static string? FindTool(string variable, string file)
+    {
+        string? configured = Environment.GetEnvironmentVariable(variable);
+        string? result = ResolveTool(configured, file, Environment.GetEnvironmentVariable("PATH") ?? "");
+        Console.WriteLine($"工具链 {variable}: {result ?? "未找到"}; 配置={configured ?? "<未设置>"}; 默认命令={file}");
+        return result;
+    }
+
+    private static string? ResolveTool(string? configured, string file, string searchPath)
+    {
+        // An explicit profile must not silently fall back to an unrelated compiler on PATH.
+        if (!string.IsNullOrEmpty(configured)) return File.Exists(configured) ? Path.GetFullPath(configured) : null;
+        foreach (string path in searchPath.Split(Path.PathSeparator))
+        {
+            if (string.IsNullOrWhiteSpace(path)) continue;
+            string candidate = Path.Combine(path.Trim('"'), file);
+            if (File.Exists(candidate)) return Path.GetFullPath(candidate);
+        }
+        return null;
+    }
+
+    internal static string MissingTool(string variable, string file) =>
+        $"{variable} ({file}; 配置={Environment.GetEnvironmentVariable(variable) ?? "<未设置>"})";
+
+    private static (string? Javac, string? Go, string? Cpp) ResolveNativeTools(bool required)
+    {
+        string javacName = OperatingSystem.IsWindows() ? "javac.exe" : "javac";
+        string goName = OperatingSystem.IsWindows() ? "go.exe" : "go";
+        string cppName = OperatingSystem.IsWindows() ? "clang++.exe" : "clang++";
+        string? javac = FindTool("ZRCONFIG_JAVAC", javacName), go = FindTool("ZRCONFIG_GO", goName), cpp = FindTool("ZRCONFIG_CXX", cppName);
+        var missing = new List<string>();
+        if (javac == null) missing.Add(MissingTool("ZRCONFIG_JAVAC", javacName));
+        else if (!File.Exists(Path.Combine(Path.GetDirectoryName(javac)!, OperatingSystem.IsWindows() ? "java.exe" : "java")))
+            missing.Add("java (JDK runtime beside " + javac + ")");
+        if (go == null) missing.Add(MissingTool("ZRCONFIG_GO", goName));
+        if (cpp == null) missing.Add(MissingTool("ZRCONFIG_CXX", cppName));
+        if (required && missing.Count != 0) throw new InvalidOperationException("跨语言验收缺少工具链：" + string.Join("; ", missing));
+        return (javac, go, cpp);
+    }
+
+    private static void CheckToolResolution(string parent)
+    {
+        string directory = Path.Combine(parent, "tool-resolution");
+        Directory.CreateDirectory(directory);
+        string compiler = Path.Combine(directory, "compiler"), missing = Path.Combine(directory, "missing");
+        File.WriteAllText(compiler, "fixture");
+        try
+        {
+            Check(ResolveTool(null, "compiler", directory) == compiler, "PATH tool resolution failed.");
+            Check(ResolveTool(compiler, "other", "") == compiler, "Explicit tool profile was ignored.");
+            Check(ResolveTool(missing, "compiler", directory) == null, "Missing explicit profile silently fell back to PATH.");
+            Check(ResolveTool(null, "missing", directory) == null, "Missing tool was accepted.");
+        }
+        finally { Directory.Delete(directory, true); }
+    }
+
     internal static string[] CppArguments(string compiler,IReadOnlyList<string> arguments)
     {
         if(!Path.GetFileNameWithoutExtension(compiler).Equals("cl",StringComparison.OrdinalIgnoreCase))return arguments.ToArray();
@@ -287,15 +349,7 @@ internal static class PortableExportTests
             Directory.CreateDirectory(output + "-" + kind);
             File.WriteAllText(Path.Combine(output + "-" + kind, "current.json"), manifest.ToJsonString());
         }
-        string? Find(string env,string file)
-        {
-            string? explicitPath=Environment.GetEnvironmentVariable(env);
-            if(!string.IsNullOrEmpty(explicitPath)&&File.Exists(explicitPath))return explicitPath;
-            foreach(string path in (Environment.GetEnvironmentVariable("PATH")??"").Split(Path.PathSeparator))
-                if(File.Exists(Path.Combine(path,file)))return Path.Combine(path,file);
-            return null;
-        }
-        string? javac=Find("ZRCONFIG_JAVAC",OperatingSystem.IsWindows()?"javac.exe":"javac"),go=Find("ZRCONFIG_GO",OperatingSystem.IsWindows()?"go.exe":"go"),cpp=Find("ZRCONFIG_CXX",OperatingSystem.IsWindows()?"clang++.exe":"clang++");
+        var (javac, go, cpp) = ResolveNativeTools(required);
         if(javac==null||go==null||cpp==null)
         {
             Check(!required,"跨语言验收需要 Java 17+、Go 1.19+、C++17；可用 ZRCONFIG_JAVAC/ZRCONFIG_GO/ZRCONFIG_CXX 指定。");
@@ -528,8 +582,17 @@ internal static class PortableExportTests
         #include <cstdlib>
         #include <new>
         static std::atomic<std::size_t> allocations{0};static volatile std::int32_t sink;
+        #if defined(__GNUC__)
+        __attribute__((noinline))
+        #endif
         void* operator new(std::size_t n){allocations.fetch_add(1,std::memory_order_relaxed);if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+        // Keep replacement allocation/deallocation boundaries visible to GCC.
+        #if defined(__GNUC__)
+        __attribute__((noinline))
+        #endif
         void operator delete(void* p)noexcept{std::free(p);}void* operator new[](std::size_t n){return ::operator new(n);}void operator delete[](void* p)noexcept{::operator delete(p);}
+        void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
+        void operator delete[](void* p,std::size_t)noexcept{::operator delete[](p);}
         void check(bool v){if(!v)throw std::runtime_error("assertion failed");}
         int main(int,char**argv){try{zrconfig::ConfigManager manager;std::filesystem::path root(argv[1]);
           for(bool json:{false,true}){auto s=manager.reload(root,json);std::string key="east";const auto&r=s->Entry().get(key,1);

@@ -62,11 +62,20 @@ jobs:
                   rustup toolchain install $rust --profile minimal
                   if ($LASTEXITCODE -ne 0) { throw 'rustup failed' }
                   $rustc = rustup which --toolchain $rust rustc
+                  if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $rustc -PathType Leaf)) { throw "Rust compiler missing: $rustc" }
                   "ZRCONFIG_RUSTC=$rustc" >> $env:GITHUB_ENV
                   $typescript = if ($env:PROFILE -eq 'minimum') { '5.8.3' } else { 'latest' }
                   npm install --prefix "$env:RUNNER_TEMP/ts-profile" --ignore-scripts --no-audit --no-fund "typescript@$typescript"
                   if ($LASTEXITCODE -ne 0) { throw 'TypeScript install failed' }
-                  "ZRCONFIG_TYPESCRIPT=$env:RUNNER_TEMP/ts-profile/node_modules/typescript/lib/typescript.js" >> $env:GITHUB_ENV
+                  $typescriptApi = "$env:RUNNER_TEMP/ts-profile/node_modules/typescript/lib/typescript.js"
+                  if (Test-Path -LiteralPath $typescriptApi -PathType Leaf) {
+                      "ZRCONFIG_TYPESCRIPT=$typescriptApi" >> $env:GITHUB_ENV
+                  } else {
+                      # TypeScript 7 ships a native compiler instead of the legacy JS API.
+                      $tsc = node -e 'const p=require("node:path"),pkg=require.resolve("@typescript/typescript-"+process.platform+"-"+process.arch+"/package.json",{paths:[process.argv[1]]});console.log(p.join(p.dirname(pkg),"lib",process.platform==="win32"?"tsc.exe":"tsc"));' "$env:RUNNER_TEMP/ts-profile/node_modules"
+                      if ($LASTEXITCODE -ne 0 -or !(Test-Path -LiteralPath $tsc -PathType Leaf)) { throw "TypeScript compiler missing: $tsc" }
+                      "ZRCONFIG_TSC=$tsc" >> $env:GITHUB_ENV
+                  }
                   if ($IsWindows) {
                       $gcc = Get-Command gcc.exe -ErrorAction SilentlyContinue
                       if (!$gcc) {
@@ -88,6 +97,41 @@ jobs:
                   if ($LASTEXITCODE -ne 0) { throw 'Lua build failed' }
                   $luaName = if ($IsWindows) { 'lua.exe' } else { 'lua' }
                   "ZRCONFIG_LUA=$(Join-Path "$env:RUNNER_TEMP/lua-profile" $luaName)" >> $env:GITHUB_ENV
+                  # Pin every executable to the setup action's selected profile.
+                  $suffix = if ($IsWindows) { '.exe' } else { '' }
+                  "ZRCONFIG_JAVAC=$(Join-Path $env:JAVA_HOME "bin/javac$suffix")" >> $env:GITHUB_ENV
+                  "ZRCONFIG_GO=$((Get-Command "go$suffix" -ErrorAction Stop).Source)" >> $env:GITHUB_ENV
+                  "ZRCONFIG_NODE=$((Get-Command "node$suffix" -ErrorAction Stop).Source)" >> $env:GITHUB_ENV
+                  if (!$IsWindows) {
+                      "ZRCONFIG_CXX=$((Get-Command 'clang++' -ErrorAction Stop).Source)" >> $env:GITHUB_ENV
+                  }
+            - name: Check selected compiler paths and versions
+              shell: pwsh
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  Start-Transcript -Path "$env:RUNNER_TEMP/server-toolchains.log"
+                  try {
+                      $typescriptVariable = if ($env:ZRCONFIG_TYPESCRIPT) { 'ZRCONFIG_TYPESCRIPT' } else { 'ZRCONFIG_TSC' }
+                      foreach ($name in @('ZRCONFIG_JAVAC', 'ZRCONFIG_GO', 'ZRCONFIG_CXX', 'ZRCONFIG_NODE', 'ZRCONFIG_RUSTC', 'ZRCONFIG_LUA', $typescriptVariable)) {
+                          $path = [Environment]::GetEnvironmentVariable($name)
+                          Write-Host "${name}=$path"
+                          if (!$path -or !(Test-Path -LiteralPath $path -PathType Leaf)) { throw "Missing compiler profile: ${name}=$path" }
+                      }
+                      foreach ($tool in @(
+                          @($env:ZRCONFIG_JAVAC, '-version'), @($env:ZRCONFIG_GO, 'version'),
+                          @($env:ZRCONFIG_CXX, '--version'), @($env:ZRCONFIG_NODE, '--version'),
+                          @($env:ZRCONFIG_RUSTC, '--version'), @($env:ZRCONFIG_LUA, '-v')
+                      )) {
+                          & $tool[0] $tool[1]
+                          if ($LASTEXITCODE -ne 0) { throw "Compiler version probe failed: $($tool[0])" }
+                      }
+                      if ($env:ZRCONFIG_TYPESCRIPT) {
+                          & $env:ZRCONFIG_NODE -e 'console.log("TypeScript " + require(process.argv[1]).version)' $env:ZRCONFIG_TYPESCRIPT
+                      } else {
+                          & $env:ZRCONFIG_TSC --version
+                      }
+                      if ($LASTEXITCODE -ne 0) { throw 'TypeScript compiler probe failed' }
+                  } finally { Stop-Transcript }
             - name: Verify contracts and frozen consumers
               shell: pwsh
               run: |

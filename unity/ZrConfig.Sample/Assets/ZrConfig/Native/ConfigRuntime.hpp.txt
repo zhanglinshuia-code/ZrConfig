@@ -33,7 +33,7 @@
 
 namespace zrconfig {
 namespace detail { class IndexedRows; class SourceBundle; class InvalidData : public std::runtime_error { public: explicit InvalidData(const std::string& message):std::runtime_error(message){} }; }
-inline void invalid(const std::string &message) { throw detail::InvalidData("配置数据无效：" + message); }
+[[noreturn]] inline void invalid(const std::string &message) { throw detail::InvalidData("配置数据无效：" + message); }
 // Server API family 1. Legacy exceptions and borrowed row APIs remain unchanged.
 enum class ErrorCode {
     NotInitialized, ManagerClosed, ReloadBusy, StaleCandidate, AlreadyCommitted,
@@ -53,7 +53,11 @@ public:
     ConfigError(ErrorCode code, std::string message, std::string stage = "", std::uint64_t operation = 0,ErrorContext context={},std::exception_ptr cause={})
         : std::runtime_error(std::move(message)), code(code), stage(std::move(stage)), operation_id(operation),context(std::move(context)),cause(std::move(cause)) {}
     ConfigError locate(std::string phase,ErrorContext details)const {
-        if(!context.version_id.empty())details.version_id=context.version_id;if(!context.table.empty())details.table=context.table;if(!context.row_key.empty())details.row_key=context.row_key;if(!context.field_path.empty())details.field_path=context.field_path;if(!context.relative_path.empty())details.relative_path=context.relative_path;
+        if(!context.version_id.empty())details.version_id=context.version_id;
+        if(!context.table.empty())details.table=context.table;
+        if(!context.row_key.empty())details.row_key=context.row_key;
+        if(!context.field_path.empty())details.field_path=context.field_path;
+        if(!context.relative_path.empty())details.relative_path=context.relative_path;
         return ConfigError(code,what(),stage.empty()?std::move(phase):stage,operation_id,std::move(details),std::current_exception());
     }
 };
@@ -108,7 +112,8 @@ public:
     Builder& max_pending_requests(std::size_t v){value_.pending_=v;return *this;}
     ResourceLimits build()const{
         if(!value_.index_estimated_||!value_.manifest_||!value_.table_||!value_.bundle_||!value_.estimated_||!value_.tables_||!value_.rows_||!value_.decoded_||!value_.elements_||!value_.depth_||!value_.string_||!value_.reads_||!value_.decodes_||!value_.pending_)throw ConfigError(ErrorCode::InvalidPlan,"Resource limits must be positive");
-        if(value_.rows_>5000000||value_.decoded_>5000000||value_.elements_>1000000||value_.depth_>64||value_.string_>(16u<<20))throw ConfigError(ErrorCode::UnsupportedCapability,"Limits exceed wire capabilities");return value_;
+        if(value_.rows_>5000000||value_.decoded_>5000000||value_.elements_>1000000||value_.depth_>64||value_.string_>(16u<<20))throw ConfigError(ErrorCode::UnsupportedCapability,"Limits exceed wire capabilities");
+        return value_;
     }
 };
 inline ResourceLimits::Builder ResourceLimits::builder(){return Builder{};}
@@ -166,7 +171,8 @@ public:
             std::ifstream input(path,std::ios::binary);if(!input)throw ConfigError(ErrorCode::ReadFailed,"Cannot open source file");std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
             for(std::size_t position=0;position<bytes.size();){cancellation.check();auto count=std::min<std::size_t>(1u<<20,bytes.size()-position);if(!input.read(reinterpret_cast<char*>(bytes.data()+position),static_cast<std::streamsize>(count)))throw ConfigError(ErrorCode::ReadFailed,"Short source read");position+=count;}
             cancellation.check();char extra;if(input.get(extra)||!input.eof())throw ConfigError(ErrorCode::ReadFailed,"Source grew or read failed");
-            if(checked_path(name)!=path||std::filesystem::file_size(path)!=size||std::filesystem::last_write_time(path)!=stamp)throw ConfigError(ErrorCode::ReadFailed,"Source changed during reading");return bytes;
+            if(checked_path(name)!=path||std::filesystem::file_size(path)!=size||std::filesystem::last_write_time(path)!=stamp)throw ConfigError(ErrorCode::ReadFailed,"Source changed during reading");
+            return bytes;
         }catch(const std::filesystem::filesystem_error& error){throw ConfigError(error.code()==std::errc::no_such_file_or_directory?ErrorCode::SourceUnavailable:ErrorCode::ReadFailed,error.what());}
     }
 };
@@ -1345,7 +1351,10 @@ protected:
     static std::size_t mix(std::size_t x){x^=x>>16;x*=0x7feb352dU;x^=x>>15;return x;}
 public:
     template<class H,class E>OrdinalIndex(std::vector<Key> keys,bool unique,H hash,E equal):keys_(std::move(keys)){
-        while(mask_<keys_.size()*2)mask_<<=1;slots_.assign(mask_,missing);if(!unique)groups_.resize(mask_);--mask_;
+        while(mask_<keys_.size()*2)mask_<<=1;
+        slots_.assign(mask_,missing);
+        if(!unique)groups_.resize(mask_);
+        --mask_;
         for(std::size_t i=0;i<keys_.size();++i){auto slot=mix(hash(keys_[i]))&mask_;while(slots_[slot]!=missing&&!equal(keys_[slots_[slot]],keys_[i]))slot=(slot+1)&mask_;if(unique&&slots_[slot]!=missing)throw ConfigError(ErrorCode::InvalidValue,"Duplicate key");if(slots_[slot]==missing)slots_[slot]=i;if(!unique)groups_[slot].push_back(i);}
     }
     std::size_t ordinal(std::size_t slot)const noexcept{return slot==missing?missing:slots_[slot];}
@@ -1399,7 +1408,8 @@ class IndexedRows {
                 if(offset<0||length<0||static_cast<std::size_t>(offset)!=end||static_cast<std::size_t>(length)>bytes_.size()-end)throw ConfigError(ErrorCode::InvalidValue,"Invalid row bounds");
                 offsets_.push_back(static_cast<std::size_t>(offset));lengths_.push_back(static_cast<std::size_t>(length));end+=static_cast<std::size_t>(length);
             }
-            if(cursor.pos+end!=bytes_.size())throw ConfigError(ErrorCode::InvalidValue,"Invalid payload size");for(auto& offset:offsets_)offset+=cursor.pos;
+            if(cursor.pos+end!=bytes_.size())throw ConfigError(ErrorCode::InvalidValue,"Invalid payload size");
+            for(auto& offset:offsets_)offset+=cursor.pos;
         }
         if(wire_.schema_.field("hasId").boolean())for(std::size_t i=0;i<ids_.size();++i){auto added=references_.emplace(ids_[i],i);if(!added.second)added.first->second=(std::numeric_limits<std::size_t>::max)();}
     }
@@ -1412,7 +1422,10 @@ public:
         if(sha256(bytes)!=expected)throw ConfigError(ErrorCode::IntegrityMismatch,"Table digest mismatch");
         auto result=std::unique_ptr<IndexedRows>(new IndexedRows(schema,std::move(bytes),file.size()>=5&&file.substr(file.size()-5)==".json",bundle.budget()));
         result->version_=bundle.version();result->relative_path_="versions/"+bundle.version()+"/"+file;
-        if(result->count()!=integer<std::uint32_t>(entry.field("rows")))throw ConfigError(ErrorCode::InvalidValue,"Row count mismatch");std::size_t raw=result->bytes_.size();for(const auto& part:result->fragments_)raw+=part.size();result->index_raw_bytes_=raw;bundle.budget()->raw(raw);return result;
+        if(result->count()!=integer<std::uint32_t>(entry.field("rows")))throw ConfigError(ErrorCode::InvalidValue,"Row count mismatch");
+        std::size_t raw=result->bytes_.size();
+        for(const auto& part:result->fragments_)raw+=part.size();
+        result->index_raw_bytes_=raw;bundle.budget()->raw(raw);return result;
     }
     void bind_references(std::shared_ptr<const std::unordered_map<std::string,IndexedRows*>> directory){references_directory_=std::move(directory);}
     std::size_t count()const noexcept{return ids_.size();}
@@ -1436,7 +1449,9 @@ public:
         }
         wire_.remaining_=detail::decode_elements();wire_.validate_fields(wire_.schema_.field("fields"),row,0,false);
         for(const auto& key:keys_.at(index).members){const auto& value=row.field(key.first);if(value.kind!=key.second.kind||value.text!=key.second.text)throw ConfigError(ErrorCode::InvalidValue,"Row key differs from index");}
-        if(ids_[index]!=(wire_.schema_.field("hasId").boolean()?integer<std::int32_t>(row.field("Id")):0))throw ConfigError(ErrorCode::InvalidValue,"Row Id differs from index");if(references_directory_)validate_references(row,[&](const std::string& name)->IndexedRows&{return *references_directory_->at(name);});return row;
+        if(ids_[index]!=(wire_.schema_.field("hasId").boolean()?integer<std::int32_t>(row.field("Id")):0))throw ConfigError(ErrorCode::InvalidValue,"Row Id differs from index");
+        if(references_directory_)validate_references(row,[&](const std::string& name)->IndexedRows&{return *references_directory_->at(name);});
+        return row;
     }
     template<class Resolve>void validate_references(const Json& row,Resolve resolve)const{
         for(const auto& field:wire_.schema_.field("fields").array()){const auto& type=*wire_.types_.at(field.field("type").string());if(type.field("kind").string()=="tablereference"){auto id=integer<std::int32_t>(row.field(field.field("name").string()));if(id)try{resolve(type.field("referenceTable").string()).reference(id);}catch(const ConfigError& error){throw error.locate("reference",{version_,wire_.name(),"",field.field("name").string(),relative_path_});}}}
@@ -1480,7 +1495,8 @@ public:
     std::size_t loaded_count()const noexcept{return loaded_.load(std::memory_order_relaxed);}
     const void* cached(std::size_t index)const noexcept{return ready_[index].load(std::memory_order_acquire);}
     const void* get(std::size_t index)const{
-        if(index>=count())throw ConfigError(ErrorCode::KeyNotFound,"Row index not found");if(auto row=ready_[index].load(std::memory_order_acquire))return row;
+        if(index>=count())throw ConfigError(ErrorCode::KeyNotFound,"Row index not found");
+        if(auto row=ready_[index].load(std::memory_order_acquire))return row;
         std::lock_guard<std::mutex> lock(gate_);if(failures_[index])std::rethrow_exception(failures_[index]);throw ConfigError(ErrorCode::RowNotLoaded,"Load the row explicitly");
     }
     const void* load(std::size_t index,const Cancellation& cancellation){

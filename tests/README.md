@@ -35,6 +35,8 @@ dotnet run --project tests/ZrConfig.Server.Tests -c Release -p:NuGetAudit=false
 
 默认入口强制要求六种原生工具链，并执行 C# 与六种语言的契约和消费方检查。仅验证托管部分时，在 `dotnet run` 的末尾加 `-- --managed-only`；它会明确跳过原生编译，不能计为七语言通过。`-- --api-only` 只执行 API 专项。已有构建可直接运行 `tests/ZrConfig.Server.Tests/bin/Release/net10.0/ZrConfig.Server.Tests.dll`。
 
+工具链预检输出每项工具的解析路径；缺失时指出对应环境变量及配置值。显式设置的路径不存在时不会回退到 PATH 中的其他版本；`ZRCONFIG_TYPESCRIPT` 设置后也不会回退到全局 `tsc`。TypeScript 7 使用原生 `tsc` 可执行文件（`ZRCONFIG_TSC`）；5.x/6.x 继续支持 `typescript.js`（`ZRCONFIG_TYPESCRIPT`）。CI 自动选择包提供的入口，另保存 `server-toolchains.log`，记录所选工具的路径和实际版本，便于定位最低／当前配置的安装问题。
+
 Git 克隆还可运行 `-- --trusted-ref <可信提交SHA>`，从不可变目标提交比较 API 基线和迁移链；需要该提交的完整历史，源码 ZIP 没有 Git 历史，不执行此项。选取真正的目标基线，不能用当前候选自身代替。
 
 [公开 CI](../.github/workflows/ci.yml) 配置 Windows/Linux/macOS 的最低与当前工具链矩阵，并保留日志。矩阵配置、一次本机成功和跨平台实际通过分别记录；最新状态以对应提交的 Actions 检查为准。性能命令见 [七语言服务器性能验收](#七语言服务器性能验收)。

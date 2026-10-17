@@ -59,7 +59,10 @@ internal static class SampleConsumers
             else if(language=="typescript")
             {
                 string source=Path.Combine(generated,"TypeScript"),compiler=Path.Combine(root,"compile.cjs");File.WriteAllText(compiler,ServerRuntimeBenchmarks.TypeScriptCompiler);File.WriteAllText(Path.Combine(source,"sample_consumer.ts"),TypeScript);
-                string node=Tool("ZRCONFIG_NODE","node");await Execute(node,[compiler,Tool("ZRCONFIG_TYPESCRIPT","typescript"),source]);await Execute(node,[Path.Combine(source,"dist","sample_consumer.js"),output]);
+                string node=Tool("ZRCONFIG_NODE","node");
+                if(Environment.GetEnvironmentVariable("ZRCONFIG_TSC") is { Length: > 0 } tsc&&string.IsNullOrEmpty(Environment.GetEnvironmentVariable("ZRCONFIG_TYPESCRIPT")))await Execute(tsc,["-p",source]);
+                else await Execute(node,[compiler,Tool("ZRCONFIG_TYPESCRIPT","typescript"),source]);
+                await Execute(node,[Path.Combine(source,"dist","sample_consumer.js"),output]);
             }
             else if(language=="lua")
             {string source=Path.Combine(root,"sample.lua");File.WriteAllText(source,Lua);await Execute(Tool("ZRCONFIG_LUA","lua"),[source,Path.Combine(generated,"Lua"),output]);}

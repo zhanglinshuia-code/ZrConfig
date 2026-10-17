@@ -369,7 +369,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -393,7 +394,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ByQuality> index_ByQuality;
     Index_Group_ByQuality& ensure_ByQuality(bool load,const Cancellation* cancellation){
-        if(!load)return index_ByQuality.get();return index_ByQuality.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByQuality> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByQuality(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByQuality>(std::move(keys)),retained);});
+        if(!load){return index_ByQuality.get();}
+        return index_ByQuality.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByQuality> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByQuality(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByQuality>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ByQuality(const T_Game_Config_Quality& k0,bool load,const Cancellation* cancellation){
@@ -783,7 +785,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -858,7 +861,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ByGroupId> index_ByGroupId;
     Index_Group_ByGroupId& ensure_ByGroupId(bool load,const Cancellation* cancellation){
-        if(!load)return index_ByGroupId.get();return index_ByGroupId.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByGroupId> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByGroupId(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByGroupId>(std::move(keys)),retained);});
+        if(!load){return index_ByGroupId.get();}
+        return index_ByGroupId.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByGroupId> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByGroupId(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByGroupId>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ByGroupId(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -882,7 +886,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -969,7 +974,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1049,7 +1055,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1134,7 +1141,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1216,7 +1224,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1292,7 +1301,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ById> index_ById;
     Index_Group_ById& ensure_ById(bool load,const Cancellation* cancellation){
-        if(!load)return index_ById.get();return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
+        if(!load){return index_ById.get();}
+        return index_ById.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ById> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ById(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ById>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ById(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1374,7 +1384,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ByLevel> index_ByLevel;
     Index_Group_ByLevel& ensure_ByLevel(bool load,const Cancellation* cancellation){
-        if(!load)return index_ByLevel.get();return index_ByLevel.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByLevel> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByLevel(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByLevel>(std::move(keys)),retained);});
+        if(!load){return index_ByLevel.get();}
+        return index_ByLevel.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByLevel> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByLevel(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByLevel>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ByLevel(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1398,7 +1409,8 @@ private:
     };
     detail::DerivedValue<Index_Group_ByQuality> index_ByQuality;
     Index_Group_ByQuality& ensure_ByQuality(bool load,const Cancellation* cancellation){
-        if(!load)return index_ByQuality.get();return index_ByQuality.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByQuality> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByQuality(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByQuality>(std::move(keys)),retained);});
+        if(!load){return index_ByQuality.get();}
+        return index_ByQuality.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_ByQuality> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_ByQuality(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_ByQuality>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_ByQuality(const std::int32_t& k0,bool load,const Cancellation* cancellation){
@@ -1422,7 +1434,8 @@ private:
     };
     detail::DerivedValue<Index_Group_BySkillId> index_BySkillId;
     Index_Group_BySkillId& ensure_BySkillId(bool load,const Cancellation* cancellation){
-        if(!load)return index_BySkillId.get();return index_BySkillId.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_BySkillId> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_BySkillId(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_BySkillId>(std::move(keys)),retained);});
+        if(!load){return index_BySkillId.get();}
+        return index_BySkillId.load(*cancellation,rows.indexed().budget(),rows.indexed().estimated_index_bytes(1),[&](){std::vector<Key_Group_BySkillId> keys;keys.reserve(rows.count());std::uint64_t retained=256+512*static_cast<std::uint64_t>(rows.count())*1;for(std::size_t i=0;i<rows.count();++i){if(auto cached=rows.cached(i))keys.push_back(cached_key_Group_BySkillId(*cached));else keys.emplace_back(rows.indexed().read_transient(i));}return std::make_pair(std::make_unique<Index_Group_BySkillId>(std::move(keys)),retained);});
     }
 public:
     const std::vector<std::size_t>& group_BySkillId(const std::int32_t& k0,bool load,const Cancellation* cancellation){

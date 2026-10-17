@@ -1128,8 +1128,17 @@ public static class ServerConsumer {
         #include <cstdlib>
         #include <new>
         static std::atomic<std::size_t> server_allocations{0};static volatile std::int32_t server_sink;
+        #if defined(__GNUC__)
+        __attribute__((noinline))
+        #endif
         void* operator new(std::size_t n){server_allocations.fetch_add(1,std::memory_order_relaxed);if(auto p=std::malloc(n?n:1))return p;throw std::bad_alloc();}
+        // Keep replacement allocation/deallocation boundaries visible to GCC.
+        #if defined(__GNUC__)
+        __attribute__((noinline))
+        #endif
         void operator delete(void* p)noexcept{std::free(p);}void* operator new[](std::size_t n){return ::operator new(n);}void operator delete[](void* p)noexcept{::operator delete(p);}
+        void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
+        void operator delete[](void* p,std::size_t)noexcept{::operator delete[](p);}
         using namespace zrconfig;
         void check(bool value) { if (!value) throw std::runtime_error("server assertion failed"); }
         template<class F> void fails(ErrorCode code, F&& f) { try { f(); } catch (const ConfigError& e) { check(e.code == code); return; } throw std::runtime_error("expected server error"); }
@@ -1147,7 +1156,8 @@ public static class ServerConsumer {
               LoadPlan plan;plan.tables=std::vector<std::string>{"Entry"};plan.prefer_json=true;plan.mode=LoadMode::LazyRowsStrict;
               auto badRoot=std::string(argv[1])+"-missing-ref";fails(ErrorCode::MissingReference,[&]{data::Snapshot::load(badRoot,plan,token);});
               plan.mode=LoadMode::LazyRowsOnAccess;auto bad=data::Snapshot::load(badRoot,plan,token);
-              for(int i=0;i<2;++i)fails(ErrorCode::MissingReference,[&]{bad->load_Entry("east",1,token);});try{bad->load_Entry("east",1,token);check(false);}catch(const ConfigError& error){check(error.context.table=="Entry"&&error.context.field_path=="Lookup"&&!error.context.row_key.empty()&&!error.context.version_id.empty()&&!error.context.relative_path.empty());}check(bad->loaded_row_count()==0);
+              for(int i=0;i<2;++i)fails(ErrorCode::MissingReference,[&]{bad->load_Entry("east",1,token);});
+              try{bad->load_Entry("east",1,token);check(false);}catch(const ConfigError& error){check(error.context.table=="Entry"&&error.context.field_path=="Lookup"&&!error.context.row_key.empty()&&!error.context.version_id.empty()&&!error.context.relative_path.empty());}check(bad->loaded_row_count()==0);
             }
             {
               for(const std::string json:{"{}","{\"tables\":[null],\"format\":\"ZrConfig.Binary/1\",\"versionId\":\"v1\"}",""}){MemoryConfigSource source({{"current.json",std::vector<std::uint8_t>(json.begin(),json.end())}});fails(ErrorCode::InvalidManifest,[&]{data::Snapshot::load(source,LoadSettings{},token);});}
