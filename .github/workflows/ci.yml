@@ -132,6 +132,17 @@ jobs:
                       }
                       if ($LASTEXITCODE -ne 0) { throw 'TypeScript compiler probe failed' }
                   } finally { Stop-Transcript }
+            - name: Compare trusted target baseline
+              if: github.event_name == 'pull_request' || github.event_name == 'push'
+              shell: pwsh
+              env:
+                  TRUSTED_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
+              run: |
+                  $ErrorActionPreference = 'Stop'
+                  if ($env:TRUSTED_BASE -and $env:TRUSTED_BASE -notmatch '^0+$') {
+                      dotnet run --project tests/ZrConfig.Server.Tests -c Release -p:NuGetAudit=false -- --trusted-ref $env:TRUSTED_BASE 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-trusted-base.log"
+                      if ($LASTEXITCODE -ne 0) { throw 'Trusted API baseline verification failed' }
+                  }
             - name: Verify contracts and frozen consumers
               shell: pwsh
               run: |
@@ -160,17 +171,6 @@ jobs:
                       $env:ZRCONFIG_CPP_SANITIZERS = $sanitizer
                       dotnet run --no-build --project tests/ZrConfig.Server.Tests -c Release 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-$sanitizer.log"
                       if ($LASTEXITCODE -ne 0) { throw "C++ $sanitizer verification failed" }
-                  }
-            - name: Compare trusted target baseline
-              if: github.event_name == 'pull_request' || github.event_name == 'push'
-              shell: pwsh
-              env:
-                  TRUSTED_BASE: ${{ github.event.pull_request.base.sha || github.event.before }}
-              run: |
-                  $ErrorActionPreference = 'Stop'
-                  if ($env:TRUSTED_BASE -and $env:TRUSTED_BASE -notmatch '^0+$') {
-                      dotnet run --no-build --project tests/ZrConfig.Server.Tests -c Release -- --trusted-ref $env:TRUSTED_BASE 2>&1 | Tee-Object "$env:RUNNER_TEMP/server-trusted-base.log"
-                      if ($LASTEXITCODE -ne 0) { throw 'Trusted API baseline verification failed' }
                   }
             - name: Preserve verification evidence
               if: always()

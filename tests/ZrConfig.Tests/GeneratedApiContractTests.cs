@@ -252,6 +252,18 @@ internal static class GeneratedApiContractTests
         string java(string value) => "static String schema() { return String.join(\"\", " + JsonSerializer.Serialize(value[..20]) + ", " + JsonSerializer.Serialize(value[20..]) + "); }";
         Check(GeneratedApiContracts.Compare(Read("Java/A.java", java(schema("old", "123"))), Read("Java/A.java", java(schema("new", "456")))).Length == 0, "Java chunked schema descriptions leaked into API.");
         Check(GeneratedApiContracts.Compare(Read("Lua/a.lua", "---@field Id integer"), Read("Lua/a.lua", "---@field Id string")).Length != 0, "Lua type annotations discarded.");
+        const string annotatedLua="---@class Entry\n---@field Id integer\nlocal M={}\n---@param id integer\n---@return integer\nfunction M.find(id) return id end\nreturn M\n";
+        var lfFiles=new Dictionary<string,string>{{"Lua/entry.lua",annotatedLua}};
+        var crlfFiles=new Dictionary<string,string>{{"Lua/entry.lua",annotatedLua.Replace("\n","\r\n",StringComparison.Ordinal)}};
+        var lf=GeneratedApiContracts.Capture("S",lfFiles);var crlf=GeneratedApiContracts.Capture("S",crlfFiles);
+        Check(GeneratedApiContracts.Digest(lf)==GeneratedApiContracts.Digest(crlf),"Lua annotation line endings changed the API descriptor.");
+        var luaPolicy=new GeneratedApiPolicy(1,Guid.NewGuid().ToString("N"),"legacy-v1","1.0",[GeneratedApiPolicies.Profile("lua")],[],[],["legacy-v1/preserve-query-and-lifetime"]);
+        var sealedLua=GeneratedApiContracts.Seal(lf with{Policy=luaPolicy,CompiledSymbols=[]},null);
+        string luaSummary=new SchemaSummary(1,"S",[]){ApiContract=sealedLua}.Serialize();
+        ApiReleaseVerifier.Verify(luaSummary,lfFiles,luaSummary,crlfFiles);
+        ApiReleaseVerifier.Verify(luaSummary,crlfFiles,luaSummary,lfFiles);
+        Check(GeneratedApiContracts.Compare(lf,Read("Lua/entry.lua",crlfFiles["Lua/entry.lua"].Replace("integer","string",StringComparison.Ordinal))).Length!=0,"CRLF annotation type changes were ignored.");
+        Check(GeneratedApiContracts.NativeSource("local value=[[first\nsecond]]",true)!=GeneratedApiContracts.NativeSource("local value=[[first\r\nsecond]]",true),"Annotation normalization altered literal contents.");
         Check(GeneratedApiContracts.NativeSource("fn f<'a>(s: &'a str) { let c = 'x'; }", false, true).Contains("&'a"), "Rust lifetime lexer failed.");
         const string luaLiterals="local M={}\nlocal a=[[function M.fake() end]]\nlocal b=[==[ ]=] function M.alsoFake() end ]==]\nlocal c=a[1]\nfunction M.real(value) return b end\nreturn M";
         var luaSymbols=Read("Lua/literals.lua",luaLiterals).NativeSymbols!;

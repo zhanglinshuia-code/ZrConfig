@@ -263,7 +263,9 @@ internal static class GeneratedApiContracts
             {
                 int end = source.IndexOf('\n', i);
                 if (end < 0) end = source.Length;
-                if (lua && source.AsSpan(i).StartsWith("---@")) output.Append(source.AsSpan(i, end - i));
+                // Type annotations are contractual, but CRLF's carriage return
+                // is a line terminator rather than part of the annotation.
+                if (lua && source.AsSpan(i).StartsWith("---@")) output.Append(source.AsSpan(i, end - i).TrimEnd('\r'));
                 Space(); i = end; continue;
             }
             if (!lua && source.AsSpan(i).StartsWith("/*"))
