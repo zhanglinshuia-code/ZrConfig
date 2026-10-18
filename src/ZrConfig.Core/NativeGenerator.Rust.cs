@@ -4,8 +4,10 @@ namespace ZrConfig.Core;
 
 internal sealed partial class NativeGenerator
 {
-    internal const int RustPartSize = 128;
-    internal const int RustPartitionThreshold = 256;
+    // Debug builds retain constructor temporaries. Bound each frame as well as
+    // the snapshot itself so loading works with a 1 MiB thread stack.
+    internal const int RustPartSize = 32;
+    internal const int RustPartitionThreshold = RustPartSize;
     private Dictionary<string,string> _rustTablePaths = new(StringComparer.Ordinal);
     private string RustMember(string table) => _rustTablePaths[table];
     private void Rust(PortableTable[] tables, Dictionary<string, string> files)
@@ -110,9 +112,9 @@ internal sealed partial class NativeGenerator
             snapshot.AppendLine($"pub(super) trait ConfigSnapshotPart{index}Access:Send+Sync{{fn storage(&self)->&ConfigSnapshotPart{index};}}\nimpl ConfigSnapshotPart{index}Access for ConfigSnapshotPart{index}{{fn storage(&self)->&ConfigSnapshotPart{index}{{self}}}}");
             snapshot.AppendLine($"pub(super) struct ConfigSnapshotPart{index} {{");
             foreach(var table in parts[index])snapshot.AppendLine($"    pub(super) table_{table.Name}:Option<{table.Name}Table>,");
-            snapshot.AppendLine($"}}\nimpl ConfigSnapshotPart{index} {{\n    #[inline(never)]\n    fn load(bundle:&R::Bundle,prefer_json:bool,selected:Option<&std::collections::HashSet<&str>>)->Result<Self>{{Ok(Self{{");
+            snapshot.AppendLine($"}}\nimpl ConfigSnapshotPart{index} {{\n    #[inline(never)]\n    fn load(bundle:&R::Bundle,prefer_json:bool,selected:Option<&std::collections::HashSet<&str>>)->Result<Box<dyn ConfigSnapshotPart{index}Access>>{{Ok(Box::new(Self{{");
             foreach(var table in parts[index])snapshot.AppendLine($"        table_{table.Name}:if selected.map_or(true,|names|names.contains({Quote(table.Name)})){{Some({table.Name}Table::__zr_load(bundle,prefer_json)?)}}else{{None}},");
-            snapshot.AppendLine("    })}\n    fn bind(&self,snapshot:&Arc<ConfigSnapshot>)->Result<()>{");
+            snapshot.AppendLine("    }))}\n    fn bind(&self,snapshot:&Arc<ConfigSnapshot>)->Result<()>{");
             foreach(var table in parts[index])snapshot.AppendLine($"        if let Some(table)=&self.table_{table.Name}{{table.__zr_bind(snapshot)?;}}");
             snapshot.AppendLine("        Ok(())\n    }\n}");
         }
@@ -128,7 +130,7 @@ internal sealed partial class NativeGenerator
         snapshot.AppendLine($"        bundle.validate_tables(&[{string.Join(", ", tables.Select(t => Quote(t.Name)))}])?;");
         snapshot.AppendLine("        Self::__zr_load_selected(&bundle, prefer_json, None)\n    }\n    pub(super) fn __zr_load_selected(bundle: &R::Bundle, _prefer_json: bool, _selected: Option<&std::collections::HashSet<&str>>) -> Result<Arc<Self>> {");
         snapshot.AppendLine("        let next = Arc::new(Self {\n            version: bundle.version.clone(),");
-        if(partitioned)for(int index=0;index<parts.Length;index++)snapshot.AppendLine($"            part_{index}:Box::new(ConfigSnapshotPart{index}::load(bundle,_prefer_json,_selected)?),");
+        if(partitioned)for(int index=0;index<parts.Length;index++)snapshot.AppendLine($"            part_{index}:ConfigSnapshotPart{index}::load(bundle,_prefer_json,_selected)?,");
         else foreach (var table in tables) snapshot.AppendLine($"            table_{table.Name}: if _selected.map_or(true, |s| s.contains({Quote(table.Name)})) {{ Some({table.Name}Table::__zr_load(bundle, _prefer_json)?) }} else {{ None }},");
         snapshot.AppendLine("        });");
         if(partitioned)for(int index=0;index<parts.Length;index++)snapshot.AppendLine($"        next.part_{index}().bind(&next)?;");
@@ -299,16 +301,17 @@ internal sealed partial class NativeGenerator
         }
         text.AppendLine("pub struct Warmup{table:&'static str,action:Box<dyn Fn(&Arc<Snapshot>,&Cancellation)->ServerResult<()>+Send+Sync>}\nimpl Warmup{pub fn table(&self)->&'static str{self.table}}");
         // Bound constructor/type-checking work and stack temporaries. Each owned
-        // part is built in table order and dropped normally on any failure.
+        // part is built and boxed in its own frame, then dropped normally on
+        // any failure. Returning the box avoids catalog-sized caller temporaries.
         if(partitioned)
         for(int index=0;index<parts.Length;index++)
         {
             text.AppendLine($"trait SnapshotPart{index}Access:Send+Sync{{fn storage(&self)->&SnapshotPart{index};}}\nimpl SnapshotPart{index}Access for SnapshotPart{index}{{fn storage(&self)->&SnapshotPart{index}{{self}}}}");
             text.AppendLine($"struct SnapshotPart{index}{{");
             foreach(var table in parts[index])text.AppendLine($"    table_{table.Name}:Option<{table.Name}Storage>,");
-            text.AppendLine($"}}\nimpl SnapshotPart{index}{{\n    #[inline(never)]\n    fn open(bundle:&R::SourceBundle<'_>,plan:&LoadPlan,selected:&std::collections::HashSet<&str>,cancellation:&Cancellation)->ServerResult<Self>{{");
+            text.AppendLine($"}}\nimpl SnapshotPart{index}{{\n    #[inline(never)]\n    fn open(bundle:&R::SourceBundle<'_>,plan:&LoadPlan,selected:&std::collections::HashSet<&str>,cancellation:&Cancellation)->ServerResult<Box<dyn SnapshotPart{index}Access>>{{");
             foreach(var table in parts[index])text.AppendLine($"        cancellation.check()?;let table_{table.Name}=if selected.contains({Quote(table.Name)}){{Some({table.Name}Storage::new(R::IndexedRows::open(bundle,{Quote(table.Serialize())},plan.prefer_json)?)?)}}else{{None}};");
-            text.AppendLine("        Ok(Self{"+string.Join(",",parts[index].Select(table=>"table_"+table.Name))+"})\n    }");
+            text.AppendLine("        Ok(Box::new(Self{"+string.Join(",",parts[index].Select(table=>"table_"+table.Name))+"}))\n    }");
             const string directory="std::collections::HashMap<String,Arc<std::collections::HashMap<i32,usize>>>";
             text.AppendLine($"    #[inline(never)]\n    fn fill_directory(&self,directory:&mut {directory}){{");
             foreach(var table in parts[index])text.AppendLine($"        if let Some(table)=&self.table_{table.Name}{{directory.insert({Quote(table.Name)}.to_owned(),table.rows.indexed.reference_keys());}}");
@@ -330,7 +333,7 @@ internal sealed partial class NativeGenerator
         if(partitioned)for(int index=0;index<parts.Length;index++)text.AppendLine($"    part_{index}:Box<dyn SnapshotPart{index}Access>,");
         else foreach(var table in tables)text.AppendLine($"    table_{table.Name}:Option<{table.Name}Storage>,");
         text.AppendLine("}\npub type Manager=R::ServerManager<Snapshot>;\nimpl Snapshot{\n    pub fn version(&self)->&str{&self.version}\n    pub fn selection(&self)->&R::SelectionPlan{&self.selection}\n    pub fn mode(&self)->LoadMode{self.mode}\n    pub fn manager()->Manager{Manager::with_policy(R::ManagerPolicy::new().with_identity(|snapshot:&Self|R::SnapshotIdentity::new(snapshot.source_namespace(),snapshot.version(),snapshot.manifest_digest())))}\n    pub fn manifest_digest(&self)->&str{&self.manifest_digest}\n    pub fn source_namespace(&self)->&str{&self.source_namespace}\n    pub fn catalog_fingerprint(&self)->&str{self.selection.catalog_fingerprint()}\n    pub fn load_plan_fingerprint(&self)->&str{&self.load_plan_fingerprint}\n    pub fn diagnostics(&self)->ServerResult<R::SnapshotDiagnostics>{self.budget.diagnostics()}\n    pub fn load(root:&Path,plan:&LoadPlan,cancellation:&Cancellation)->ServerResult<Arc<Self>>{\n        let source=R::FileConfigSource::new(root);let settings=R::LoadSettings::new(plan.clone()).with_source_namespace(source.source_namespace());Self::load_source(&source,&settings,cancellation)\n    }\n    pub fn load_source(source:&dyn R::ConfigSource,settings:&R::LoadSettings,cancellation:&Cancellation)->ServerResult<Arc<Self>>{\n        let plan=settings.plan();let catalog=super::server::Snapshot::catalog()?;let requested=match &plan.tables{Some(tables)=>tables.iter().map(String::as_str).collect::<Vec<_>>(),None=>catalog.tables().iter().map(R::TableDescriptor::name).collect()};\n        let selection=catalog.select(&requested)?;for name in &plan.warmup_tables{if !selection.tables().contains(name){return Err(ConfigError::new(ErrorCode::InvalidPlan,\"Warmup outside selection\"))}}\n        cancellation.check()?;let bundle=R::SourceBundle::open(source,settings,cancellation)?;bundle.validate_catalog(catalog)?;let _selected=selection.tables().iter().map(String::as_str).collect::<std::collections::HashSet<_>>();");
-        if(partitioned)for(int index=0;index<parts.Length;index++)text.AppendLine($"        let part_{index}=Box::new(SnapshotPart{index}::open(&bundle,plan,&_selected,cancellation)?);");
+        if(partitioned)for(int index=0;index<parts.Length;index++)text.AppendLine($"        let part_{index}=SnapshotPart{index}::open(&bundle,plan,&_selected,cancellation)?;");
         else foreach(var table in tables)text.AppendLine($"        cancellation.check()?;let table_{table.Name}=if _selected.contains({Quote(table.Name)}){{Some({table.Name}Storage::new(R::IndexedRows::open(&bundle,{Quote(table.Serialize())},plan.prefer_json)?)?)}}else{{None}};");
         text.AppendLine("        let next=Self{load_plan_fingerprint:R::load_plan_fingerprint(plan.mode,plan.prefer_json,selection.tables()),version:bundle.version().to_owned(),manifest_digest:bundle.digest.clone(),source_namespace:settings.source_namespace().to_owned(),budget:bundle.budget.clone(),selection,mode:plan.mode,"+string.Join(",",partitioned?Enumerable.Range(0,parts.Length).Select(index=>"part_"+index):tables.Select(t=>"table_"+t.Name))+"};");
         if (tables.Length != 0) text.AppendLine("        let mut directory=std::collections::HashMap::new();");

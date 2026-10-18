@@ -58,7 +58,9 @@ internal static class AdditionalLanguageTests
             string rustSource=Path.Combine(boundary,"check.rs");
             string boundedStack=kind.StartsWith("large-forward-",StringComparison.Ordinal)?"assert!(std::mem::size_of::<zrconfig::ConfigSnapshot>()<4096);"+(kind.EndsWith("-server",StringComparison.Ordinal)?"assert!(std::mem::size_of::<zrconfig::data::Snapshot>()<4096);":""):"";
             string largeRuntime=kind.StartsWith("large-forward-",StringComparison.Ordinal)?LargeRustBoundary(kind.EndsWith("-server",StringComparison.Ordinal)):"";
-            File.WriteAllText(rustSource,"#[path = "+JsonSerializer.Serialize(Path.Combine(boundary,"Rust","lib.rs"))+"]\nmod zrconfig;\nfn main() {"+boundedStack+largeRuntime+"}\n");
+            // Size-of checks alone miss large debug-build constructor temporaries.
+            // Exercise the complete load/reload lifecycle on a fixed stack on every OS.
+            File.WriteAllText(rustSource,"#[path = "+JsonSerializer.Serialize(Path.Combine(boundary,"Rust","lib.rs"))+"]\nmod zrconfig;\nfn main() {std::thread::Builder::new().name(\"bounded-stack\".into()).stack_size(1024*1024).spawn(check).unwrap().join().unwrap();}\nfn check() {"+boundedStack+largeRuntime+"}\n");
             await Run(rust,["--edition","2021","-D","warnings",rustSource,"-o",Path.Combine(boundary,"rust-check")],boundary);
             await Run(Path.Combine(boundary,"rust-check"),[Path.Combine(boundary,"Output")],boundary);
             string script=Path.Combine(boundary,"check.lua");
