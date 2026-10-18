@@ -1175,7 +1175,7 @@ public static class ServerConsumer {
               LoadPlan plan;plan.mode=LoadMode::LazyRowsOnAccess;plan.tables=std::vector<std::string>{"Lookup"};LoadSettings settings(plan);settings.with_limits(ResourceLimits::builder().max_decoded_rows(1).build()).with_source_namespace("memory-test");
               auto bytes=file.read("current.json",1ull<<30,token);auto manifest=parse_json(std::string(bytes.begin(),bytes.end()));std::string path="Lookup.bytes";
               std::unordered_map<std::string,std::vector<std::uint8_t>> files{{"current.json",bytes},{path,file.read(path,1ull<<30,token)}};
-              std::shared_ptr<const data::Snapshot> snapshot;{MemoryConfigSource memory(files);for(auto& entry:files)std::fill(entry.second.begin(),entry.second.end(),0);snapshot=data::Snapshot::load(memory,settings,token);}
+              std::shared_ptr<const data::Snapshot> snapshot;{MemoryConfigSource memory(files);for(auto& entry:files)std::fill(entry.second.begin(),entry.second.end(),std::uint8_t{0});snapshot=data::Snapshot::load(memory,settings,token);}
               check(snapshot->source_namespace()=="memory-test"&&snapshot->manifest_digest().size()==64);auto diagnostics=snapshot->diagnostics();check(diagnostics.declared_rows==2&&diagnostics.decoded_rows==0&&diagnostics.read_bytes>diagnostics.retained_raw_bytes);
               {auto row=snapshot->load_Lookup(10,token);check(row.Id()==10);for(int i=0;i<2;++i)fails(ErrorCode::LimitExceeded,[&]{snapshot->load_Lookup(20,token);});}
               diagnostics=snapshot->diagnostics();check(diagnostics.decoded_rows==1&&diagnostics.active_decodes==0&&diagnostics.pending_jobs==0&&diagnostics.faulted_rows==0&&std::string(diagnostics.health())=="Healthy");
