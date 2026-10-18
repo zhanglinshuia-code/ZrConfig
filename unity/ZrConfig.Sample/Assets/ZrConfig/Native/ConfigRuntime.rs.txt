@@ -1453,7 +1453,7 @@ pub(super) struct SourceBundle<'a>{source:&'a dyn ConfigSource,cancellation:&'a 
 impl<'a> SourceBundle<'a>{
     pub(super) fn open(source:&'a dyn ConfigSource,settings:&LoadSettings,cancellation:&'a Cancellation)->ServerResult<Self>{
         cancellation.check()?;let limits=settings.limits.clone();let budget=Arc::new(LoadBudget::new(limits.clone()));
-        let maximum=limits.max_manifest_bytes.min(limits.max_bundle_bytes);let bytes=source.read("current.json",maximum,cancellation).map_err(|e|e.locate("read","","","","","current.json"))?;cancellation.check()?;
+        let maximum=limits.max_manifest_bytes.min(limits.max_bundle_bytes);let bytes=source.read("Common/current.json",maximum,cancellation).or_else(|e|if e.code==ErrorCode::SourceUnavailable{cancellation.check()?;source.read("current.json",maximum,cancellation).map_err(|e|e.locate("read","","","","","current.json"))}else{Err(e.locate("read","","","","","Common/current.json"))})?;cancellation.check()?;
         if bytes.len()as u64>maximum{return Err(LoadBudget::limit());}budget.read(bytes.len())?;
         let text=std::str::from_utf8(&bytes).map_err(|e|ConfigError::new(ErrorCode::InvalidEncoding,e.to_string()))?;
         let manifest=limited_decode(&limits,||parse_json_scoped(text,Some(&JsonAllocationBounds::manifest(&limits)))).map_err(|mut e|{if e.code==ErrorCode::InvalidValue{e.code=ErrorCode::InvalidManifest;}e})?;
@@ -1467,7 +1467,7 @@ impl<'a> SourceBundle<'a>{
     pub(super) fn version(&self)->&str{&self.metadata.version}
     pub(super) fn validate_catalog(&self,catalog:&Catalog)->ServerResult<()>{self.metadata.validate_catalog(catalog)}
     fn read(&self,file:&str)->ServerResult<Vec<u8>>{
-        self.cancellation.check()?;let maximum=self.budget.read_limit()?;let path=format!("versions/{}/{}",self.metadata.version,file);
+        self.cancellation.check()?;let maximum=self.budget.read_limit()?;let path=self.metadata.table_path(file);
         let table=file.rsplit_once('.').map_or(file,|(name,_)|name);let bytes=self.source.read(&path,maximum,self.cancellation).map_err(|e|e.locate("read",&self.metadata.version,table,"","",&path))?;self.cancellation.check()?;if bytes.len()as u64>maximum{return Err(LoadBudget::limit());}self.budget.read(bytes.len())?;Ok(bytes)
     }
 }
@@ -1502,7 +1502,7 @@ impl IndexedRows {
         let expected=entry.field(if alternate{"jsonSha256"}else{"sha256"}).and_then(Json::string).and_then(hash).map_err(data_error)?;
         if sha256(&bytes)!=expected{return Err(ConfigError::new(ErrorCode::IntegrityMismatch,"Table digest mismatch"))}
         let mut result=limited_decode(&bundle.budget.limits,||Self::new(wire,bytes,bundle.metadata.format=="ZrConfig.Json/1"||alternate,bundle.budget.clone()))?;
-        result.version=bundle.version().to_owned();result.relative_path=format!("versions/{}/{}",bundle.version(),file);
+        result.version=bundle.version().to_owned();result.relative_path=bundle.metadata.table_path(file);
         if result.count()!=declared{return Err(ConfigError::new(ErrorCode::InvalidValue,"Row count mismatch"))}
         let raw=if let Some(fragments)=&result.fragments{fragments.iter().map(|s|s.len()as u64).sum()}else{result.bytes.len()as u64};bundle.budget.state()?.raw+=raw;
         Ok(result)
@@ -1764,11 +1764,13 @@ fn hash(v: &str) -> Result<String> {
 pub struct Bundle {
     target:String,
     root: PathBuf,
+    prefix: String,
     pub version: String,
     format: String,
     entries: HashMap<String, Json>,
 }
 impl Bundle {
+    fn table_path(&self,file:&str)->String{format!("{}{}{}",self.prefix,if self.prefix=="Tables/"{if file.ends_with(".json"){"json/"}else{"bytes/"}}else{""},file)}
     pub(super) fn validate_catalog(&self, catalog: &Catalog) -> ServerResult<()> {
         if !catalog.target.is_empty()&&catalog.target!=self.target{return Err(ConfigError::new(ErrorCode::CatalogMismatch,"Manifest target differs from catalog"))}
         if self.entries.len() != catalog.tables.len() { return Err(ConfigError::new(ErrorCode::TableSetMismatch,"Manifest table set differs from catalog")); }
@@ -1780,7 +1782,7 @@ impl Bundle {
         Ok(())
     }
     pub fn open(root: &Path) -> Result<Self> {
-        let manifest = parse_json(&std::fs::read_to_string(root.join("current.json")).map_err(|e| e.to_string())?)?;
+        let manifest = parse_json(&std::fs::read_to_string(root.join("Common/current.json")).or_else(|e|if e.kind()==std::io::ErrorKind::NotFound{std::fs::read_to_string(root.join("current.json"))}else{Err(e)}).map_err(|e| e.to_string())?)?;
         Self::from_manifest(root,&manifest)
     }
     fn from_manifest(root:&Path,manifest:&Json)->Result<Self>{
@@ -1792,6 +1794,9 @@ impl Bundle {
             return invalid("清单格式无效");
         }
         let version = segment(manifest.field("versionId")?.string()?)?.to_owned();
+        let layout=match manifest.field("layout"){Ok(value) if !value.is_null()=>value.string()?,_=>""};
+        if layout!=""&&layout!="flat"&&layout!="grouped"{return invalid("Unsupported data layout");}
+        let prefix=if layout=="grouped"{"Tables/".to_owned()}else if layout=="flat"{String::new()}else{format!("versions/{version}/")};
         let mut entries = HashMap::new();
         for entry in manifest.field("tables")?.array()? {
             let name = segment(entry.field("name")?.string()?)?;
@@ -1834,6 +1839,7 @@ impl Bundle {
         Ok(Self {
             target:manifest.field("target").and_then(Json::string).unwrap_or("").to_owned(),
             root: root.to_owned(),
+            prefix,
             version,
             format: format.to_owned(),
             entries,
@@ -1859,7 +1865,7 @@ impl Bundle {
         let file = entry
             .field(if alternate { "jsonFile" } else { "file" })?
             .string()?;
-        let bytes = std::fs::read(self.root.join("versions").join(&self.version).join(file))
+        let bytes = std::fs::read(self.root.join(self.table_path(file)))
             .map_err(|e| e.to_string())?;
         if sha256(&bytes)
             != hash(

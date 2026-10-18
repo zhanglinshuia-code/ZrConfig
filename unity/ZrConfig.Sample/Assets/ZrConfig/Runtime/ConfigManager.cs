@@ -91,7 +91,7 @@ namespace ZrConfig.Runtime
             bool published = false;
             try
             {
-                ConfigManifest manifest = _decodeManifest(s_strictUtf8.GetString(source.Read("current.json", cancellationToken)));
+                ConfigManifest manifest = _decodeManifest(s_strictUtf8.GetString(ReadManifest(source, cancellationToken)));
                 List<ConfigManifestTable> plan = ValidateAndCopy(manifest);
                 candidate = new ConfigSnapshot(manifest.versionId, source, plan, _registry, this, _options);
                 RegisterCandidate(candidate);
@@ -141,7 +141,7 @@ namespace ZrConfig.Runtime
             try
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                byte[] manifestBytes = await source.ReadAsync("current.json", cancellationToken);
+                byte[] manifestBytes = await ReadManifestAsync(source, cancellationToken);
                 ConfigManifest manifest = _decodeManifest(s_strictUtf8.GetString(manifestBytes));
                 List<ConfigManifestTable> plan = ValidateAndCopy(manifest);
                 candidate = new ConfigSnapshot(manifest.versionId, source, plan, _registry, this, _options);
@@ -254,11 +254,25 @@ namespace ZrConfig.Runtime
             }
         }
 
+        internal static bool MissingManifest(Exception error) => error is FileNotFoundException || error is DirectoryNotFoundException || error is System.Collections.Generic.KeyNotFoundException ||
+            error is Server.ConfigException failure && failure.Code == Server.ErrorCode.SourceUnavailable;
+
+        private static byte[] ReadManifest(ISyncConfigSource source, CancellationToken token)
+        {
+            try { return source.Read("Common/current.json", token); }
+            catch (Exception error) when (MissingManifest(error)) { token.ThrowIfCancellationRequested(); return source.Read("current.json", token); }
+        }
+        private static async ConfigOperation<byte[]> ReadManifestAsync(IConfigSource source, CancellationToken token)
+        {
+            try { return await source.ReadAsync("Common/current.json", token); }
+            catch (Exception error) when (MissingManifest(error)) { token.ThrowIfCancellationRequested(); return await source.ReadAsync("current.json", token); }
+        }
+
         private List<ConfigManifestTable> ValidateAndCopy(ConfigManifest manifest) => ValidateAndCopy(manifest, _options?.PreferJson == true);
 
         internal static List<ConfigManifestTable> ValidateAndCopy(ConfigManifest manifest, bool preferJson)
         {
-            if (manifest == null || (manifest.format != "ZrConfig.Binary/1" && manifest.format != "ZrConfig.Json/1" && manifest.format != "ZrConfig.Mixed/1") || !SafeSegment(manifest.versionId) || manifest.tables == null)
+            if (manifest == null || (manifest.format != "ZrConfig.Binary/1" && manifest.format != "ZrConfig.Json/1" && manifest.format != "ZrConfig.Mixed/1") || !SafeSegment(manifest.versionId) || manifest.tables == null || (!string.IsNullOrEmpty(manifest.layout) && manifest.layout != "flat" && manifest.layout != "grouped"))
             {
                 throw new InvalidDataException(ConfigText.Get("版本清单无效。", "Invalid manifest."));
             }
@@ -278,7 +292,9 @@ namespace ZrConfig.Runtime
                     (mixed ? entry.jsonFile != entry.name + ".json" || !IsHash(entry.jsonSha256) : !string.IsNullOrEmpty(entry.jsonFile) || !string.IsNullOrEmpty(entry.jsonSha256)))
                     throw new InvalidDataException("版本清单格式与文件信息不一致。");
                 bool json = mixed && preferJson;
-                result.Add(new ConfigManifestTable { name = entry.name, file = json ? entry.jsonFile : entry.file, rows = entry.rows, schemaHash = entry.schemaHash, sha256 = json ? entry.jsonSha256 : entry.sha256 });
+                string file = json ? entry.jsonFile : entry.file;
+                result.Add(new ConfigManifestTable { name = entry.name, file = file, rows = entry.rows, schemaHash = entry.schemaHash, sha256 = json ? entry.jsonSha256 : entry.sha256,
+                    relativePath = manifest.layout == "grouped" ? "Tables/" + (file.EndsWith(".json", StringComparison.Ordinal) ? "json/" : "bytes/") + file : manifest.layout == "flat" ? file : "versions/" + manifest.versionId + "/" + file });
             }
 
             return result;

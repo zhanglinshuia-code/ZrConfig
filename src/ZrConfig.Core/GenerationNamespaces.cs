@@ -82,8 +82,9 @@ public sealed record GenerationNamespaces(string? CSharp = null, string? Java = 
             if(path=="Rust/Cargo.toml"&&Rust!="zrconfig")source=source.Replace("name = \"zrconfig-generated\"","name = "+JsonSerializer.Serialize(Rust),StringComparison.Ordinal);
             string next=PathFor(path);if(next!=path)files.Remove(path);files[next]=source;
         }
-        if(Go!="zrconfig")files.Add("Go/go.mod","module "+Go+"\n\ngo 1.19\n");
-        if(TypeScript!="./snapshot;./data")
+        if(Go!="zrconfig" && files.Keys.Any(path=>path.StartsWith("Go/",StringComparison.Ordinal)))
+            files.Add("Go/go.mod","module "+Go+"\n\ngo 1.19\n");
+        if(TypeScript!="./snapshot;./data" && files.Keys.Any(path=>path.StartsWith("TypeScript/",StringComparison.Ordinal)))
         {
             var exports = new Dictionary<string,object>();
             foreach (string module in new[] { "snapshot", "data", "server", "runtime" })

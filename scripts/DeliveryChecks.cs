@@ -28,15 +28,15 @@ internal static class DeliveryChecks
             Maintenance.RunDotNet([cli, "validate", data, code, rules, "--report", Path.Combine(temporary, "validation.json")]);
             Maintenance.Require(!Directory.Exists(output) && before.OrderBy(p => p.Key).SequenceEqual(Fingerprints(code).OrderBy(p => p.Key)), "只校验改写了 Config 或 Output。");
             Maintenance.RunDotNet([cli, "export", data, output, code, rules]);
-            byte[] current = File.ReadAllBytes(Path.Combine(output, "current.json"));
+            byte[] current = File.ReadAllBytes(Path.Combine(output, "CSharp", "Common", "current.json"));
             Maintenance.WriteText(Path.Combine(rules, "Invalid.cs"), "This is deliberately invalid C#;");
             Maintenance.RunDotNet([cli, "export", data, output, code, rules], expected: 1, capture: true);
-            Maintenance.Require(current.SequenceEqual(File.ReadAllBytes(Path.Combine(output, "current.json"))), "失败导出改写当前版本。");
+            Maintenance.Require(current.SequenceEqual(File.ReadAllBytes(Path.Combine(output, "CSharp", "Common", "current.json"))), "失败导出改写当前版本。");
             File.Delete(Path.Combine(rules, "Invalid.cs"));
             Maintenance.RunDotNet([cli, "export", data, output, code, rules]);
-            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output, "current.json")));
+            using var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output, "CSharp", "Common", "current.json")));
             string version = manifest.RootElement.GetProperty("versionId").GetString()!;
-            Maintenance.Require(File.Exists(Path.Combine(output, "versions", version, "manifest.json")) && File.Exists(Path.Combine(output, "versions", version, "release.json")), "缺少版本独立清单。");
+            Maintenance.Require(manifest.RootElement.GetProperty("layout").GetString() == "grouped" && !Directory.Exists(Path.Combine(output, "versions")), "导出未使用固定目录。");
             string project = Path.Combine(temporary, "project.zrconfig.json");
             Maintenance.WriteJson(project, new
             {

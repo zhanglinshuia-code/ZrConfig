@@ -17,6 +17,21 @@ string root = Path.Combine(Path.GetTempPath(), "zrconfig-server-" + Guid.NewGuid
 Directory.CreateDirectory(root);
 try
 {
+    if (args.Contains("--stable-export-only", StringComparer.Ordinal))
+    {
+        await PortableExportTests.CheckStableExports(root);
+        return;
+    }
+    if (args.Contains("--single-language-only", StringComparer.Ordinal))
+    {
+        await PortableExportTests.RunAsync(root, singleLanguagesOnly: true);
+        return;
+    }
+    if (args.Contains("--consumers-only", StringComparer.Ordinal))
+    {
+        await PortableExportTests.RunAsync(root, requireNative: !args.Contains("--managed-only", StringComparer.Ordinal), consumersOnly: true);
+        return;
+    }
     GeneratedApiContractTests.Run(root);
     if (!args.Contains("--api-only", StringComparer.Ordinal))
         await PortableExportTests.RunAsync(root, requireNative: !args.Contains("--managed-only", StringComparer.Ordinal));

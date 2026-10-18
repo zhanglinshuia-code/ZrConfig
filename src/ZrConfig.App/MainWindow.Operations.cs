@@ -16,7 +16,7 @@ public sealed partial class MainWindow
 {
     private readonly Button _validateButton = new() { MinWidth = 120 };
     private readonly Button _cancelButton = new() { IsEnabled = false };
-    private readonly Button _historyButton = new();
+    private readonly Button _historyButton = new() { IsVisible = false };
     private readonly Button _reportButton = new() { IsEnabled = false };
     private readonly Button _setupButton = new();
     private readonly Button _recentOpenButton = new();
@@ -209,7 +209,7 @@ public sealed partial class MainWindow
         _operationProgress.IsIndeterminate = true;
         _statusTone = LogTone.Information;
         _statusText = () => mode == "validate" ? ConfigText.Get("正在只校验；不会发布数据。", "Validating; no data will be published.") :
-            mode == "generate" ? ConfigText.Get("正在检查并生成代码。", "Reviewing and generating code.") : ConfigText.Get("正在校验并准备发布。", "Validating and preparing publication.");
+            mode == "generate" ? ConfigText.Get("正在检查并生成代码。", "Reviewing and generating code.") : ConfigText.Get("正在校验并准备更新表文件。", "Validating and preparing table updates.");
         SetBusy(true);
         RefreshStatus();
         _eventTimer.Start();
@@ -240,12 +240,14 @@ public sealed partial class MainWindow
             int errors = diagnostics.Count(d => d.Severity == DiagnosticSeverity.Error);
             _statusTone = result.Cancelled ? LogTone.Information : result.Success ? warnings > 0 ? LogTone.Warning : LogTone.Success : LogTone.Error;
             _statusText = () => result.Cancelled
-                ? result.CodeCommitted ? ConfigText.Get("已取消；代码已更新，数据未发布，当前版本保持不变。", "Cancelled; code was updated, data was not published, and the active version is unchanged.")
-                    : ConfigText.Get("已取消；代码和当前发布版本保持不变。", "Cancelled; code and the active version are unchanged.")
+                ? result.CodeCommitted ? ConfigText.Get("已取消；代码已更新，数据未发布，原数据保持不变。", "Cancelled; code was updated, data was not published, and existing data is unchanged.")
+                    : ConfigText.Get("已取消；代码和原数据保持不变。", "Cancelled; code and the active version are unchanged.")
                 : result.NeedsGeneration ? ConfigText.Get("需要生成代码；完整校验尚未完成，未发布数据。", "Code generation required; validation is incomplete and no data was published.")
                 : result.Success ? mode == "generate" ? ConfigText.Get($"模型已生成 · {warnings} 条警告；Unity 端需编译对应脚本。", $"Models generated · {warnings} warnings. Compile matching Unity scripts.")
                     : mode == "validate" ? ConfigText.Get($"校验通过 · {warnings} 条警告 · 未发布数据", $"Validation passed · {warnings} warnings · No data published")
-                    : ConfigText.Get($"已发布 {result.Export?.VersionId} · {warnings} 条警告", $"Published {result.Export?.VersionId} · {warnings} warnings")
+                    : result.Export?.ReusedVersion == true
+                        ? ConfigText.Get($"数据未变化 · 文件保持不变 · {warnings} 条警告", $"Data unchanged · Files preserved · {warnings} warnings")
+                        : ConfigText.Get($"导出完成 · 更新 {result.Export?.UpdatedTables} 张表 · {warnings} 条警告", $"Export complete · Updated {result.Export?.UpdatedTables} tables · {warnings} warnings")
                 : ConfigText.Get($"操作未通过 · {errors} 条错误 · {warnings} 条警告", $"Operation failed · {errors} errors · {warnings} warnings") +
                     (result.CodeCommitted ? ConfigText.Get("；代码已更新，数据未发布。", "; code was updated; data was not published.") : "");
             var log = new StringBuilder();
@@ -377,22 +379,29 @@ public sealed partial class MainWindow
             !Directory.Exists(settings.CodeFolder) ? ConfigText.Get("代码尚未生成；请查看生成预览。", "Code has not been generated; review generation.") :
             _inputsChanged && _lastWorkflow != null ? ConfigText.Get("输入或设置已变化，上次结果已过期。", "Inputs or settings changed; the previous result is stale.") :
             _lastWorkflow?.NeedsGeneration == true ? ConfigText.Get("结构变化，需要生成代码。", "Schema changed; code generation required.") :
-            _lastWorkflow?.Success == true ? ConfigText.Get("最近操作成功；发布状态以当前版本为准。", "Last operation succeeded; see the active version for publication state.") :
+            _lastWorkflow?.Success == true ? ConfigText.Get("最近操作成功；数据保存在输出目录。", "Last operation succeeded; data is in the output directory.") :
             ConfigText.Get("等待校验；读取磁盘上已保存的 Excel。", "Awaiting validation; reads Excel saved on disk.");
-        string active = settings.OutputFolder == _activeVersionFolder ? _activeVersionText ?? ConfigText.Get("尚未发布", "Not published") : ConfigText.Get("尚未读取", "Not read yet");
+        string active = settings.OutputFolder == _activeVersionFolder ? _activeVersionText ?? ConfigText.Get("尚未导出", "Not exported") : ConfigText.Get("尚未读取", "Not read yet");
         _projectState.Text = source + (unsaved ? ConfigText.Get(" · 设置未保存", " · Unsaved settings") : "") + Environment.NewLine + state + Environment.NewLine +
-            ConfigText.Get($"当前版本：{active} · ", $"Active version: {active} · ") + (string.IsNullOrWhiteSpace(settings.RulesFolder) ? ConfigText.Get("仅基础校验", "Basic validation only") :
+            ConfigText.Get($"导出数据：{active} · ", $"Exported data: {active} · ") + (string.IsNullOrWhiteSpace(settings.RulesFolder) ? ConfigText.Get("仅基础校验", "Basic validation only") :
                 Directory.Exists(settings.RulesFolder) ? ConfigText.Get("已配置业务规则", "Business rules configured") : ConfigText.Get("规则目录不存在", "Rules directory missing"));
     }
 
     private async void RefreshActiveVersionAsync()
     {
-        string folder = ReadWorkspace().OutputFolder;
+        WorkspaceSettings settings = ReadWorkspace();
+        string folder = settings.OutputFolder;
         int request = ++_activeVersionRequest;
         string? version;
         try
         {
-            version = await Task.Run(() => ReleaseHistory.TryReadCurrent(folder)?.VersionId);
+            var manifests = await Task.Run(() => settings.CodeLanguages.Select(language =>
+                ReleaseHistory.TryReadCurrent(Path.Combine(folder, ExportOptions.LanguageDirectory(language)))).OfType<ReleaseManifest>().ToArray());
+            if (manifests.Length != 0)
+                version = ConfigText.Get($"{manifests.Length} 种语言，{manifests.Max(m => m.Tables.Length)} 张表，固定目录", $"{manifests.Length} languages, {manifests.Max(m => m.Tables.Length)} tables, fixed directories");
+            else
+                version = await Task.Run(() => ReleaseHistory.TryReadCurrent(folder)) == null ? null :
+                    ConfigText.Get("旧版目录，导出后按语言归类", "Legacy layout; export to group by language");
         }
         catch (Exception error) { version = ConfigText.Get("无法读取：", "Cannot read: ") + error.Message; }
         if (!_watchersClosed && request == _activeVersionRequest && ReadWorkspace().OutputFolder == folder)

@@ -16,7 +16,7 @@ This document describes the actual layout for source/sample maintainers. Everyda
 | unity/ZrConfig.Sample/Assets/HotUpdate/Config | Business types, tool-provided serialization support, optional converters, and generated source for every table; maintained by developers/the tool |
 | unity/ZrConfig.Sample/Assets/Editor/ConfigRules | Shared business-validation rules |
 | samples/Projects | Models and Validators compilation projects linking Config/Rules |
-| samples/Output | Shared exports/logs; versions preserves historical releases |
+| samples/Output | Shared exports/logs; language folders contain Common and Tables/json, Tables/bytes; only changed table files are overwritten |
 | scripts/samples | C# workbook rebuild code and AllTypesDefinition.json |
 | scripts | .NET maintenance project with Bash/PowerShell entry points for building, packaging, installation, and cleanup |
 | tests | Integration/UI/performance checks; public seven-language contract/consumer acceptance in ZrConfig.Server.Tests links four fixtures from ZrConfig.Tests; test Excel files go only to temporary directories or obj |
@@ -29,7 +29,7 @@ This document describes the actual layout for source/sample maintainers. Everyda
 
 Unity demo scripts/scenes are under unity/ZrConfig.Sample/Assets. All samples share editable Assets configuration source in unity/ZrConfig.Sample/Assets/HotUpdate/Config and post-validation in unity/ZrConfig.Sample/Assets/Editor/ConfigRules. Each generation updates Config/Generated directly. Configuration compiles as ZrConfig.Models; rules compile as Editor-only ZrConfig.Sample.Rules.Editor. Use English directory/file names.
 
-samples/Projects links configuration/rules for .NET compilation checks. src/ZrConfig.Runtime and src/ZrConfig.Validation retain only .NET projects linking corresponding Assets/ZrConfig source. Unity compiles all ZrConfig source directly, without ZrConfig DLLs or com.zrconfig.unity. Validation and Unity/Editor asmdefs are Editor-only. `unity-sample` generates/exports and deploys the shared version to Assets/StreamingAssets/ZrConfig. `package-unity` exports reusable Assets/ZrConfig source only into a new artifacts directory. Old samples/Config and samples/Rules have been migrated without copies or links. Project settings use saved paths and do not redirect old directories automatically.
+samples/Projects links configuration/rules for .NET compilation checks. src/ZrConfig.Runtime and src/ZrConfig.Validation retain only .NET projects linking corresponding Assets/ZrConfig source. Unity compiles all ZrConfig source directly, without ZrConfig DLLs or com.zrconfig.unity. Validation and Unity/Editor asmdefs are Editor-only. `unity-sample` generates/exports and deploys the shared data to Assets/StreamingAssets/ZrConfig. `package-unity` exports reusable Assets/ZrConfig source only into a new artifacts directory. Old samples/Config and samples/Rules have been migrated without copies or links. Project settings use saved paths and do not redirect old directories automatically.
 
 Save Unity .meta files with their source. Generated .meta files are excluded from generated-source content comparison. Library, Temp, Logs, UserSettings, and build caches are unversioned. Each table generates one XxxConfig.g.cs containing its record, query table, extensions, and codec; all tables share one TableCodecs.g.cs. After generation preview/confirmation, old split files and their .meta files are removed transactionally while retaining the merged main file's GUID. Keep only one generated layout; see [generated file organization](development.en.md#generated-file-organization). Sample usage belongs in samples/README.md.
 
@@ -65,7 +65,7 @@ bash tests/smoke.sh             # Compare generated files; build; run UI/integra
 
 Windows equivalents are `powershell -File scripts/maintain.ps1 clean`, `powershell -File scripts/maintain.ps1 check-layout`, and `powershell -File tests/smoke.ps1`. They share C# implementations and require only .NET SDK 10; macOS does not require PowerShell. Source packaging, extraction/installation, path-metadata cleanup, and release-license checks share scripts/ReleaseFiles.cs; Windows packaging shares scripts/Packages.cs. Cleanup skips directory links and preserves scripts/bin and scripts/obj in use by maintenance; exit the process before deleting those.
 
-Cleanup never deletes source, official Excel workbooks, or documentation. Do not keep unique source or measurement records in output directories. Fixed logs describe the latest run; historical logs are in Output/Logs/&lt;run-id&gt;. Data versions enable atomic switching and must not be casually removed while clients still read them. Performance reports go to artifacts/performance/latest.
+Cleanup never deletes source, official Excel workbooks, or documentation. Do not keep unique source or measurement records in output directories. Fixed logs describe the latest run; historical logs are in Output/Logs/&lt;run-id&gt;. New exports use fixed table paths; legacy version directories are preserved. Performance reports go to artifacts/performance/latest.
 
 ## Documentation responsibilities
 

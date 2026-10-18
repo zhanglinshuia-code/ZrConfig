@@ -3,6 +3,14 @@ namespace ZrConfig.Core;
 /// <summary>目标语言与数据格式独立选择，旧项目默认值保持 C# 和二进制。</summary>
 public static class ExportOptions
 {
+    public static string LanguageDirectory(string language) => language switch
+    {
+        "csharp" => "CSharp", "java" => "Java", "go" => "Go", "cpp" => "Cpp",
+        "lua" => "Lua", "typescript" => "TypeScript", "rust" => "Rust",
+        _ => throw new ArgumentException("Unknown output language: " + language)
+    };
+    internal static string TablePath(string file) => "Tables/" + (file.EndsWith(".json", StringComparison.Ordinal) ? "json/" : "bytes/") + file;
+
     public static string Format(string value) => (value ?? "").Trim().ToLowerInvariant() switch
     {
         "binary" => "binary",

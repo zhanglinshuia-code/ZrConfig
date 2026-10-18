@@ -1194,8 +1194,11 @@ type bundle struct {
 	digest string
 	version string
 	folder  string
+	prefix string
 	entries map[string]any
 }
+
+func(b *bundle)tablePath(file string)string{if b.prefix=="Tables/"{format:="bytes/";if strings.HasSuffix(file,".json"){format="json/"};return b.prefix+format+file};return b.prefix+file}
 
 func pathSegment(s string) string {
 	if s == "" || strings.HasPrefix(s, ".") || strings.ContainsAny(s, "/\\:") {
@@ -1211,11 +1214,11 @@ func readFile(path string) []byte {
 	return b
 }
 func openBundle(root string) *bundle {
-	return parseBundle(readFile(filepath.Join(root, "current.json")),root,nil)
+	name:="Common/current.json";data,err:=os.ReadFile(filepath.Join(root,name));if errors.Is(err,os.ErrNotExist){data,err=os.ReadFile(filepath.Join(root,"current.json"))};if err!=nil{panic(err)};return parseBundle(data,root,nil)
 }
 func sourceFailure(err error)error{var own *ConfigError;if errors.As(err,&own){copy:=*own;if err!=own{copy.Cause=err};return &copy};if errors.Is(err,context.Canceled){return &ConfigError{Code:Cancelled,Cause:err}};if errors.Is(err,context.DeadlineExceeded){return &ConfigError{Code:DeadlineExceeded,Cause:err}};return &ConfigError{Code:ReadFailed,Stage:"read",Cause:err}}
 func openServerBundle(ctx context.Context,source ConfigSource,limits ResourceLimits)*bundle{
-    data,err:=source.Read(ctx,"current.json",limits.MaxManifestBytes);if err!=nil{panic(locateError(sourceFailure(err),"read","","","","","current.json"))};if err=checkContext(ctx);err!=nil{panic(err)};if int64(len(data))>limits.MaxManifestBytes{panic(serverError(LimitExceeded))};owned:=append([]byte(nil),data...);budget:=&loadBudget{limits:limits};if err=budget.chargeRead(len(owned));err!=nil{panic(err)}
+    name:="Common/current.json";data,err:=source.Read(ctx,name,limits.MaxManifestBytes);if errors.Is(err,os.ErrNotExist){if cancelled:=checkContext(ctx);cancelled!=nil{panic(cancelled)};name="current.json";data,err=source.Read(ctx,name,limits.MaxManifestBytes)};if err!=nil{panic(locateError(sourceFailure(err),"read","","","","",name))};if err=checkContext(ctx);err!=nil{panic(err)};if int64(len(data))>limits.MaxManifestBytes{panic(serverError(LimitExceeded))};owned:=append([]byte(nil),data...);budget:=&loadBudget{limits:limits};if err=budget.chargeRead(len(owned));err!=nil{panic(err)}
     b:=parseBundle(owned,"",budget);b.source=source;b.ctx=ctx;hash:=sha256.Sum256(owned);b.digest=hex.EncodeToString(hash[:]);return b
 }
 func parseBundle(data []byte,root string,budget *loadBudget)(result *bundle){
@@ -1226,7 +1229,9 @@ func parseBundle(data []byte,root string,budget *loadBudget)(result *bundle){
 		if budget!=nil{panic(serverError(UnsupportedFormat))};invalid("清单格式不支持")
 	}
 	version := pathSegment(text(field(doc, "versionId")))
-	b := &bundle{version:version,folder:filepath.Join(root, "versions", version),entries:map[string]any{},budget:budget}
+	b := &bundle{version:version,prefix:"versions/"+version+"/",entries:map[string]any{},budget:budget}
+    if layout:=object(doc)["layout"];layout!=nil{if text(layout)=="grouped"{b.prefix="Tables/"}else if text(layout)=="flat"{b.prefix=""}else if text(layout)!=""{invalid("Unsupported data layout")}}
+    b.folder=root
     if target,ok:=object(doc)["target"].(string);ok{b.target=target}
 	if budget!=nil&&len(array(field(doc,"tables")))>budget.limits.MaxTables{panic(serverError(LimitExceeded))}
 	for _, entry := range array(field(doc, "tables")) {
@@ -1288,7 +1293,7 @@ func (b *bundle) load(schema string, preferJSON bool) []any {
 		}
 	}
 	file := pathSegment(text(field(entry, fileName)))
-	data := readFile(filepath.Join(b.folder, file))
+	data := readFile(filepath.Join(b.folder, b.tablePath(file)))
 	hash := sha256.Sum256(data)
 	if !strings.EqualFold(hex.EncodeToString(hash[:]), text(field(entry, hashName))) {
 		invalid("文件哈希不匹配")
@@ -1323,9 +1328,9 @@ func(b *bundle)openRows(schema string,preferJSON bool)*indexedRows{
 	w:=newWire(schema);entry,ok:=b.entries[w.schema.Name];if !ok||text(field(entry,"schemaHash"))!=w.schema.Hash{panic(serverError(SchemaMismatch))}
 	fileName,hashName:="file","sha256";if preferJSON{if v,ok:=object(entry)["jsonFile"].(string);ok&&v!=""{fileName,hashName="jsonFile","jsonSha256"}}
 	file:=pathSegment(text(field(entry,fileName)));var data []byte
-    if b.source==nil{data=readFile(filepath.Join(b.folder,file))}else{if err:=b.budget.chargeRows(int(signed(field(entry,"rows"),32)));err!=nil{panic(err)};limit:=b.budget.limits.MaxTableBytes;b.budget.gate.Lock();remaining:=b.budget.limits.MaxBundleBytes-b.budget.readBytes;b.budget.gate.Unlock();if remaining<limit{limit=remaining};if limit<=0{panic(serverError(LimitExceeded))};var err error;data,err=b.source.Read(b.ctx,"versions/"+b.version+"/"+file,limit);if err!=nil{panic(locateError(sourceFailure(err),"read",b.version,w.schema.Name,"","","versions/"+b.version+"/"+file))};if err=checkContext(b.ctx);err!=nil{panic(err)};if int64(len(data))>limit{panic(serverError(LimitExceeded))};if err=b.budget.chargeRead(len(data));err!=nil{panic(err)};data=append([]byte(nil),data...);w.limits=&b.budget.limits};digest:=sha256.Sum256(data)
+    if b.source==nil{data=readFile(filepath.Join(b.folder,b.tablePath(file)))}else{if err:=b.budget.chargeRows(int(signed(field(entry,"rows"),32)));err!=nil{panic(err)};limit:=b.budget.limits.MaxTableBytes;b.budget.gate.Lock();remaining:=b.budget.limits.MaxBundleBytes-b.budget.readBytes;b.budget.gate.Unlock();if remaining<limit{limit=remaining};if limit<=0{panic(serverError(LimitExceeded))};var err error;data,err=b.source.Read(b.ctx,b.tablePath(file),limit);if err!=nil{panic(locateError(sourceFailure(err),"read",b.version,w.schema.Name,"","",b.tablePath(file)))};if err=checkContext(b.ctx);err!=nil{panic(err)};if int64(len(data))>limit{panic(serverError(LimitExceeded))};if err=b.budget.chargeRead(len(data));err!=nil{panic(err)};data=append([]byte(nil),data...);w.limits=&b.budget.limits};digest:=sha256.Sum256(data)
 	if !strings.EqualFold(hex.EncodeToString(digest[:]),text(field(entry,hashName))){panic(serverError(IntegrityMismatch))}
-	result:=newIndexedRows(w,data,strings.HasSuffix(file,".json"));result.budget=b.budget;result.version=b.version;result.relativePath="versions/"+b.version+"/"+file;if b.budget!=nil{raw:=int64(len(result.data));for _,fragment:=range result.fragments{raw+=int64(len(fragment))};b.budget.gate.Lock();result.indexRawBytes=raw;b.budget.rawBytes+=raw;b.budget.gate.Unlock()};if int64(len(result.ids))!=signed(field(entry,"rows"),32){panic(serverError(InvalidValue))};return result
+	result:=newIndexedRows(w,data,strings.HasSuffix(file,".json"));result.budget=b.budget;result.version=b.version;result.relativePath=b.tablePath(file);if b.budget!=nil{raw:=int64(len(result.data));for _,fragment:=range result.fragments{raw+=int64(len(fragment))};b.budget.gate.Lock();result.indexRawBytes=raw;b.budget.rawBytes+=raw;b.budget.gate.Unlock()};if int64(len(result.ids))!=signed(field(entry,"rows"),32){panic(serverError(InvalidValue))};return result
 }
 func newIndexedRows(w *wireReader,data []byte,isJSON bool)*indexedRows{
 	result:=&indexedRows{wire:w,references:map[int32]int{},jsonBounds:jsonBoundsFor(w.schema,w.limits)}

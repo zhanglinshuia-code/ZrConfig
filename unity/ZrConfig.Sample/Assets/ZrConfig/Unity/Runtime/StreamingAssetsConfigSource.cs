@@ -67,6 +67,8 @@ namespace ZrConfig.Unity
                 cancellationToken.ThrowIfCancellationRequested();
                 if (request.result != UnityWebRequest.Result.Success)
                 {
+                    if (request.responseCode == 404 || (_root.StartsWith("file:", StringComparison.OrdinalIgnoreCase) && !File.Exists(new Uri(address).LocalPath)))
+                        throw new FileNotFoundException("Configuration resource not found: " + path, path);
                     throw new IOException("Could not read configuration resource " + path + ": " + request.error);
                 }
 

@@ -1,3 +1,4 @@
+using System.Text.Json;
 using ZrConfig.Runtime;
 using ZrConfig.Validation;
 
@@ -57,7 +58,7 @@ public static class ProjectWorkflow
             progress?.Invoke(ProjectWorkflowStage.Preparing);
             operation.Report("preparing", ConfigText.Get("检查结构和生成代码", "Checking schema and generated code"));
             plan = await Task.Run(() => ModelGenerator.PrepareWithNamespaces(settings.Namespaces,settings.RuntimeFamily, settings.DataFolder, settings.CodeFolder, diagnostics,
-                message => operation.Report("compiling", message), settings.Target, operation, settings.CodeLanguages, settings.DataFormat));
+                message => operation.Report("compiling", message), settings.Target, operation, PreparationLanguages(settings, operation), settings.DataFormat));
             operation.Checkpoint();
             if (plan == null)
             {
@@ -112,7 +113,7 @@ public static class ProjectWorkflow
             operation.Checkpoint();
             progress?.Invoke(mode == "validate" ? ProjectWorkflowStage.Validating : ProjectWorkflowStage.Exporting);
             ExportResult result = await Task.Run(() => mode == "validate" ? ExportPipeline.ValidateWithSources(settings, rulesDebug, operation) :
-                ExportPipeline.RunWithSources(settings.DataFolder, settings.OutputFolder, settings.CodeFolder, settings.RulesFolder, rulesDebug, settings.Target, operation, settings.DataFormat));
+                ExportPipeline.RunWithSources(settings.DataFolder, settings.OutputFolder, settings.CodeFolder, settings.RulesFolder, rulesDebug, settings.Target, operation, settings.DataFormat, settings.CodeLanguages));
             return new(result.Success, result.Cancelled, plan, diagnostics.Snapshot(), result)
             {
                 CodeCommitted = codeCommitted
@@ -133,6 +134,30 @@ public static class ProjectWorkflow
             {
                 CodeCommitted = true
             };
+        }
+    }
+
+    internal static string[] PreparationLanguages(WorkspaceSettings settings, WorkflowOperation operation)
+    {
+        string[] selected = settings.CodeLanguages;
+        if (operation.PruneLanguages) return selected;
+        // Generation/export/validation keeps the accepted output set current. Deselecting a
+        // language must not implicitly request deletion of its public API.
+        // Only explicit pruning reviews language removals through the API gate.
+        string summary = Path.Combine(settings.CodeFolder, ".schema.json");
+        if (!File.Exists(summary)) return selected;
+        try
+        {
+            var contract = JsonSerializer.Deserialize<SchemaSummary>(File.ReadAllText(summary))?.ApiContract;
+            if (contract?.Policy == null) return selected;
+            GeneratedApiContracts.Validate(contract);
+            return ExportOptions.Languages(selected.Concat(contract.Policy.Profiles.Select(profile => profile.Language))
+                .Distinct(StringComparer.Ordinal));
+        }
+        catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException)
+        {
+            // ModelGenerationPlan reports an invalid baseline and prevents writes.
+            return selected;
         }
     }
 }

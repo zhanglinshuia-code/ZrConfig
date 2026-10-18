@@ -16,7 +16,7 @@
 | unity/ZrConfig.Sample/Assets/HotUpdate/Config | 项目业务类型、工具提供的读写支持、可选转换器与全部表的生成源码；程序员/工具维护 |
 | unity/ZrConfig.Sample/Assets/Editor/ConfigRules | 共用业务检查规则 |
 | samples/Projects | 链接 Config/Rules 的 Models、Validators 编译工程 |
-| samples/Output | 统一导出和日志；versions 保留历史发布 |
+| samples/Output | 统一导出和日志；按语言组织 Common 和 Tables/json、Tables/bytes，表文件按需覆盖 |
 | scripts/samples | C# Excel 示例重建代码和 AllTypesDefinition.json 定义 |
 | scripts | .NET 维护工程与 Bash/PowerShell 入口；构建、打包、安装和清理 |
 | tests | 集成/UI/性能验证；ZrConfig.Server.Tests 是公开的七语言契约与消费方验收入口，链接 ZrConfig.Tests 中的四份共享夹具；测试 Excel 只生成到临时目录或 obj |
@@ -29,7 +29,7 @@
 
 Unity 示例的展示脚本与场景集中在 unity/ZrConfig.Sample/Assets。全部示例共用的配置源码位于 unity/ZrConfig.Sample/Assets/HotUpdate/Config，后置检查位于 unity/ZrConfig.Sample/Assets/Editor/ConfigRules，均为可直接编辑的 Assets 文件；生成器每次直接更新 Config/Generated。配置编译为独立 ZrConfig.Models，规则编译为仅编辑器可用的 ZrConfig.Sample.Rules.Editor。目录和文件名使用英文。
 
-samples/Projects 继续链接配置与规则进行 .NET 编译检查；src/ZrConfig.Runtime、src/ZrConfig.Validation 只保留 .NET 工程，链接 Assets/ZrConfig 下的对应源码。Unity 直接编译全部 ZrConfig 源码，不导入 ZrConfig DLL，不使用 com.zrconfig.unity 包。Validation 和 Unity/Editor 的 asmdef 限定 Editor。`unity-sample` 生成配置、导出数据并将统一导出版本部署到 Assets/StreamingAssets/ZrConfig；`package-unity` 仅向新的 artifacts 目录导出可放入其他工程的 Assets/ZrConfig 源码。旧 samples/Config、samples/Rules 已统一迁移，不保留副本或链接；项目设置使用当前保存的路径，不自动重定向历史目录。
+samples/Projects 继续链接配置与规则进行 .NET 编译检查；src/ZrConfig.Runtime、src/ZrConfig.Validation 只保留 .NET 工程，链接 Assets/ZrConfig 下的对应源码。Unity 直接编译全部 ZrConfig 源码，不导入 ZrConfig DLL，不使用 com.zrconfig.unity 包。Validation 和 Unity/Editor 的 asmdef 限定 Editor。`unity-sample` 生成配置、导出数据并将统一导出数据部署到 Assets/StreamingAssets/ZrConfig；`package-unity` 仅向新的 artifacts 目录导出可放入其他工程的 Assets/ZrConfig 源码。旧 samples/Config、samples/Rules 已统一迁移，不保留副本或链接；项目设置使用当前保存的路径，不自动重定向历史目录。
 
 Unity 的 .meta 与对应源码一同保存，Generated 的 .meta 不参与生成源码内容比对；Library、Temp、Logs、UserSettings 和构建缓存不纳入版本控制。每张表统一生成一个 XxxConfig.g.cs，包含记录、查询表、扩展入口和 Codec，全部表共用唯一的 TableCodecs.g.cs。旧拆分文件及其配套 .meta 经过生成预览和确认后事务删除，保留合并主文件的 GUID；不保留两套生成布局，详见 [生成文件组织](development.md#生成文件组织)。示例操作统一维护在 samples/README.md。
 
@@ -65,7 +65,7 @@ bash tests/smoke.sh             # 生成比对、构建、UI、集成与统一�
 
 Windows 对应 `powershell -File scripts/maintain.ps1 clean`、`powershell -File scripts/maintain.ps1 check-layout`、`powershell -File tests/smoke.ps1`。这些入口共用 C# 实现，只需 .NET SDK 10；macOS 不要求安装 PowerShell。源码打包、解压安装、路径元数据清理与发布许可校验共用 scripts/ReleaseFiles.cs；Windows 打包逻辑共用 scripts/Packages.cs。清理脚本跳过目录链接，保留维护进程正在使用的 scripts/bin、scripts/obj；如需删除，先退出维护进程。
 
-源码、正式 Excel 和文档不会被清理脚本删除。不要把唯一的源码或测量记录放入产物目录。固定日志表示最近一次，独立历史日志保存在 Output/Logs/&lt;运行编号&gt;；数据版本用于原子切换，不应在仍有客户端读取时随意删除。性能报告固定写到 artifacts/performance/latest。
+源码、正式 Excel 和文档不会被清理脚本删除。不要把唯一的源码或测量记录放入产物目录。固定日志表示最近一次，独立历史日志保存在 Output/Logs/&lt;运行编号&gt;；新导出使用固定表文件路径，已有旧版目录保留。性能报告固定写到 artifacts/performance/latest。
 
 ## 文档职责
 

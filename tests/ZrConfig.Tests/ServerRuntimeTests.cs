@@ -74,7 +74,7 @@ internal static class ServerRuntimeTests
         {
             var bounded=new AsyncOnlyBoundedSource(source);
             var loaded=await boundedManager.ReloadAsync(bounded,new ZrConfig.Runtime.Server.PreparationOptions(selectedTables:["Entry"]));
-            Check(bounded.Reads==3 && loaded.Snapshot.LoadedRowCount==4);
+            Check(bounded.Reads==4 && loaded.Snapshot.LoadedRowCount==4);
             var delayed=new AsyncOnlyBoundedSource(source,delay:true);
             try { await boundedManager.PrepareAsync(delayed,new ZrConfig.Runtime.Server.PreparationOptions(timeout:TimeSpan.FromMilliseconds(25))); throw new Exception("Missing deadline failure."); }
             catch(ZrConfig.Runtime.Server.ConfigException error) { Check(error.Code==ZrConfig.Runtime.Server.ErrorCode.DeadlineExceeded); }
@@ -90,9 +90,9 @@ internal static class ServerRuntimeTests
         using(var failedRead=new ZrConfig.Runtime.Server.Manager(serverCatalog,decode))
         {
             var ioFailure=new IOException("controlled source failure");
-            byte[] FailPayload(string path,CancellationToken token)=>path=="current.json"?source.Read(path,token):throw ioFailure;
+            byte[] FailPayload(string path,CancellationToken token)=>path.EndsWith("current.json", StringComparison.Ordinal)?source.Read(path,token):throw ioFailure;
             try{failedRead.Prepare(new ZrConfig.Runtime.DelegateSyncConfigSource(FailPayload,(path,token)=>ZrConfig.Runtime.ConfigOperation<byte[]>.FromResult(FailPayload(path,token))));throw new Exception("Source read succeeded unexpectedly.");}
-            catch(ZrConfig.Runtime.Server.ConfigException error){Check(error.Code==ZrConfig.Runtime.Server.ErrorCode.ReadFailed&&error.Stage=="read"&&error.OperationId>0&&error.VersionId.Length>0&&error.Table.Length>0&&error.RelativePath.StartsWith("versions/",StringComparison.Ordinal)&&ReferenceEquals(error.GetBaseException(),ioFailure));}
+            catch(ZrConfig.Runtime.Server.ConfigException error){Check(error.Code==ZrConfig.Runtime.Server.ErrorCode.ReadFailed&&error.Stage=="read"&&error.OperationId>0&&error.VersionId.Length>0&&error.Table.Length>0&&!error.RelativePath.Contains("/")&&ReferenceEquals(error.GetBaseException(),ioFailure));}
         }
         foreach(bool json in new[]{false,true})
         {
@@ -113,7 +113,7 @@ internal static class ServerRuntimeTests
         var selection = serverCatalog.Select(["Entry"]);
         Check(selection.Tables.Select(t => t.Name).SequenceEqual(new[] { "Entry", "Lookup" }));
         var selected = selectedManager.Reload(selectedSource, new ZrConfig.Runtime.Server.PreparationOptions(selectedTables: ["Entry"])).Snapshot;
-        Check(selected.LoadedRowCount == 4 && reads.Count == 3 && reads.All(p => !p.Contains("Concrete")));
+        Check(selected.LoadedRowCount == 4 && reads.Count == 4 && reads.All(p => !p.Contains("Concrete")));
         Error(ZrConfig.Runtime.Server.ErrorCode.UnsupportedCapability, () => selected.AsLegacySnapshot());
         Error(ZrConfig.Runtime.Server.ErrorCode.TableNotSelected, () => selected.GetTable(serverCatalog.Tables.Single(t => t.Name == "Concrete").GetCodec()));
         Check(selected.GetTable(serverCatalog.Tables.Single(t => t.Name == "Entry").GetCodec()).Rows.Count == 2);
@@ -271,7 +271,7 @@ internal static class ServerRuntimeTests
             byte[] Read(string path, CancellationToken token) { reads++; return source.Read(path, token); }
             var snapshot = manager.Reload(new ZrConfig.Runtime.DelegateSyncConfigSource(Read, (p,t) => ZrConfig.Runtime.ConfigOperation<byte[]>.FromResult(Read(p,t))),
                 new ZrConfig.Runtime.Server.PreparationOptions(preferJson: json, selectedTables: ["Lookup"], mode: mode, enableDiagnostics:true)).Snapshot;
-            Check(snapshot.CompletedTableCount == 0 && snapshot.LoadedRowCount == 0 && reads == 2 && snapshot.Diagnostics.OpenedTableCount == 1);
+            Check(snapshot.CompletedTableCount == 0 && snapshot.LoadedRowCount == 0 && reads == 3 && snapshot.Diagnostics.OpenedTableCount == 1);
             Code(ZrConfig.Runtime.Server.ErrorCode.RowNotLoaded, () => snapshot.TryGetRow<T,int>(codec,10));
             Code(ZrConfig.Runtime.Server.ErrorCode.TableNotLoaded, () => snapshot.GetTable(codec));
             Check(snapshot.TryGetRow<T,int>(codec,999) == null && snapshot.LoadedRowCount == 0);
@@ -285,7 +285,7 @@ internal static class ServerRuntimeTests
             var peer = row.LoadReference<T>(codec,20,"Peer")!;
             Check(ReferenceEquals(peer.GetReference<T>(codec,10,"Peer"), row) && snapshot.LoadedRowCount == 2);
             var table = snapshot.LoadTable(codec);
-            Check(table.Rows.Cast<object>().Any(r => ReferenceEquals(r,row.Borrow())) && snapshot.CompletedTableCount == 1 && snapshot.LoadedRowCount == 2 && reads == 2);
+            Check(table.Rows.Cast<object>().Any(r => ReferenceEquals(r,row.Borrow())) && snapshot.CompletedTableCount == 1 && snapshot.LoadedRowCount == 2 && reads == 3);
             snapshot.LoadAll(); manager.Clear();
             Check(ReferenceEquals(snapshot.GetRow<T,int>(codec,10),row) && ReferenceEquals(row.GetReference<T>(codec,20,"Peer"),peer));
         }
@@ -330,7 +330,7 @@ internal static class ServerRuntimeTests
             for(int i=0;i<10;i++)oldSnapshots.Add(admission.Reload(new ZrConfig.Runtime.FileConfigSource(output),new ZrConfig.Runtime.Server.PreparationOptions(selectedTables:["Entry"],mode:ZrConfig.Runtime.Server.LoadMode.LazyRowsOnAccess)).Snapshot);
             byte[] manifestBytes=File.ReadAllBytes(Path.Combine(output,"current.json"));var manifest=decode(System.Text.Encoding.UTF8.GetString(manifestBytes));
             string lookupFile=manifest.tables.Single(entry=>entry.name=="Lookup").file;
-            long allowance=oldSnapshots.Sum(snapshot=>snapshot.EstimatedRetainedBytes)+4*(manifestBytes.LongLength+new FileInfo(Path.Combine(output,"versions",manifest.versionId,lookupFile)).Length)+1000;
+            long allowance=oldSnapshots.Sum(snapshot=>snapshot.EstimatedRetainedBytes)+4*(manifestBytes.LongLength+new FileInfo(Path.Combine(output,lookupFile)).Length)+1000;
             using var prepared=admission.Prepare(new ZrConfig.Runtime.FileConfigSource(output),new ZrConfig.Runtime.Server.PreparationOptions(selectedTables:["Lookup"],mode:ZrConfig.Runtime.Server.LoadMode.LazyRowsOnAccess,limits:new ZrConfig.Runtime.Server.ResourceLimits(maxEstimatedLiveBytes:allowance)));
             foreach(var snapshot in oldSnapshots)snapshot.LoadAll();
             Code(ZrConfig.Runtime.Server.ErrorCode.BudgetExceeded,()=>admission.Commit(prepared));
@@ -405,10 +405,10 @@ internal static class ServerRuntimeTests
         string root = output + "-bad-row";
         var manifest=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(output,"current.json")))!;
         string version=manifest["versionId"]!.GetValue<string>();
-        string directory=Path.Combine(root,"versions",version); Directory.CreateDirectory(directory);
+        string directory=root; Directory.CreateDirectory(directory);
         var entry=manifest["tables"]!.AsArray().Single(t=>t!["name"]!.GetValue<string>()=="Lookup")!;
         string file=entry["file"]!.GetValue<string>();
-        byte[] bytes=File.ReadAllBytes(Path.Combine(output,"versions",version,file));
+        byte[] bytes=File.ReadAllBytes(Path.Combine(output,file));
         using(var input=new MemoryStream(bytes)) using(var reader=new BinaryReader(input))
         {
             input.Position=8;
@@ -431,8 +431,8 @@ internal static class ServerRuntimeTests
         {
             var manifest=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllBytes(Path.Combine(output,"current.json")))!;
             string version=manifest["versionId"]!.GetValue<string>(),table=kind=="array"||kind.StartsWith("field-",StringComparison.Ordinal)?"Entry":"Lookup",destination=output+"-json-"+kind;
-            string folder=Path.Combine(destination,"versions",version);Directory.CreateDirectory(folder);
-            foreach(string file in Directory.GetFiles(Path.Combine(output,"versions",version)))File.Copy(file,Path.Combine(folder,Path.GetFileName(file)),true);
+            string folder=destination;Directory.CreateDirectory(folder);
+            foreach(string file in Directory.GetFiles(output).Where(p => Path.GetExtension(p) is ".bytes" or ".json"))File.Copy(file,Path.Combine(folder,Path.GetFileName(file)),true);
             var entry=manifest["tables"]!.AsArray().Single(value=>value!["name"]!.GetValue<string>()==table)!;
             string path=Path.Combine(folder,entry["jsonFile"]!.GetValue<string>());
             var document=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllBytes(path))!;
@@ -455,7 +455,7 @@ internal static class ServerRuntimeTests
         var manifest = System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllText(Path.Combine(output, "current.json")))!;
         foreach(string kind in new[]{"wrong-target","missing-target"}){var changed=manifest.DeepClone();if(kind=="wrong-target")changed["target"]="C";else changed.AsObject().Remove("target");Directory.CreateDirectory(output+"-"+kind);File.WriteAllText(Path.Combine(output+"-"+kind,"current.json"),changed.ToJsonString());}
         string version = manifest["versionId"]!.GetValue<string>();
-        string target = Path.Combine(output + "-selected", "versions", version);
+        string target = output + "-selected";
         Directory.CreateDirectory(target);
         File.Copy(Path.Combine(output,"current.json"),Path.Combine(output+"-selected","current.json"),true);
         foreach (var table in manifest["tables"]!.AsArray())
@@ -464,17 +464,17 @@ internal static class ServerRuntimeTests
             foreach (string field in new[] { "file", "jsonFile" })
             {
                 string name = table[field]!.GetValue<string>();
-                File.Copy(Path.Combine(output,"versions",version,name),Path.Combine(target,name),true);
+                File.Copy(Path.Combine(output,name),Path.Combine(target,name),true);
             }
         }
         string corrupt=output+"-missing-ref";
-        string corruptFolder=Path.Combine(corrupt,"versions",version); Directory.CreateDirectory(corruptFolder);
+        string corruptFolder=corrupt; Directory.CreateDirectory(corruptFolder);
         var bad=manifest.DeepClone();
         foreach(var entry in bad["tables"]!.AsArray())
         {
             if(entry!["name"]!.GetValue<string>()=="Concrete") continue;
             string file=entry["jsonFile"]!.GetValue<string>();
-            byte[] bytes=File.ReadAllBytes(Path.Combine(output,"versions",version,file));
+            byte[] bytes=File.ReadAllBytes(Path.Combine(output,file));
             if(entry["name"]!.GetValue<string>()=="Entry")
             {
                 var doc=System.Text.Json.Nodes.JsonNode.Parse(bytes)!;
@@ -485,9 +485,9 @@ internal static class ServerRuntimeTests
             File.WriteAllBytes(Path.Combine(corruptFolder,file),bytes);
         }
         File.WriteAllText(Path.Combine(corrupt,"current.json"),bad.ToJsonString());
-        string large=output+"-large-ids",largeFolder=Path.Combine(large,"versions",version);Directory.CreateDirectory(largeFolder);
+        string large=output+"-large-ids",largeFolder=large;Directory.CreateDirectory(largeFolder);
         var largeManifest=manifest.DeepClone();var largeEntry=largeManifest["tables"]!.AsArray().Single(t=>t!["name"]!.GetValue<string>()=="Lookup")!;
-        string largeFile=largeEntry["jsonFile"]!.GetValue<string>();var largeDocument=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllBytes(Path.Combine(output,"versions",version,largeFile)))!;
+        string largeFile=largeEntry["jsonFile"]!.GetValue<string>();var largeDocument=System.Text.Json.Nodes.JsonNode.Parse(File.ReadAllBytes(Path.Combine(output,largeFile)))!;
         foreach(var row in largeDocument["rows"]!.AsArray()){row!["Id"]=row["Id"]!.GetValue<int>()+1000;row["Peer"]=row["Peer"]!.GetValue<int>()+1000;}
         byte[] largeBytes=System.Text.Encoding.UTF8.GetBytes(largeDocument.ToJsonString());File.WriteAllBytes(Path.Combine(largeFolder,largeFile),largeBytes);
         largeEntry["jsonSha256"]=Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(largeBytes));File.WriteAllText(Path.Combine(large,"current.json"),largeManifest.ToJsonString());
@@ -641,7 +641,7 @@ public static class ServerConsumer {
             for(String kind:new String[]{"wrong-target","missing-target"})code(ErrorCode.CatalogMismatch,()->DataSnapshot.load(Path.of(args[0]+"-"+kind),new LoadPlan(LoadMode.ServerDefault,null,false,java.util.List.of()),policyToken));
             try{DataSnapshot.load(Path.of(args[0]),new LoadPlan(LoadMode.ServerDefault,null,false,java.util.List.of(),ResourceLimits.builder().maxTables(1).build(),""),policyToken);throw new AssertionError();}catch(ConfigException error){check(error.code==ErrorCode.LimitExceeded&&error.stage.equals("parse"));}
             ConfigSource source=(name,maximum,cancellation)->{calls.incrementAndGet();return fileSource.read(name,maximum,cancellation);};
-            code(ErrorCode.LimitExceeded,()->DataSnapshot.load(source,new LoadPlan(LoadMode.ServerDefault,null,false,java.util.List.of(),ResourceLimits.builder().maxManifestBytes(1).build(),"test"),policyToken));check(calls.get()==1);
+            code(ErrorCode.LimitExceeded,()->DataSnapshot.load(source,new LoadPlan(LoadMode.ServerDefault,null,false,java.util.List.of(),ResourceLimits.builder().maxManifestBytes(1).build(),"test"),policyToken));check(calls.get()==2);
             code(ErrorCode.UnsupportedCapability,()->ResourceLimits.builder().maxDepth(65).build());
             code(ErrorCode.LimitExceeded,()->DataSnapshot.load(source,new LoadPlan(LoadMode.ServerDefault,java.util.List.of("Entry"),false,java.util.List.of(),ResourceLimits.builder().maxRows(1).build(),"test"),policyToken));
             code(ErrorCode.LimitExceeded,()->DataSnapshot.load(source,new LoadPlan(LoadMode.ServerDefault,java.util.List.of("Lookup"),false,java.util.List.of(),ResourceLimits.builder().maxTableBytes(1).build(),"test"),policyToken));
@@ -777,7 +777,7 @@ public static class ServerConsumer {
           for _,json:=range []string{"{}",`{"tables":[null],"format":"ZrConfig.Binary/1","versionId":"v1"}`,""}{memory,_:=NewMemoryConfigSource(map[string][]byte{"current.json":[]byte(json)});_,err=LoadDataSource(ctx,memory,LoadPlan{});code(InvalidManifest,err)}
           fileSource,err:=NewFileConfigSource(root);if err!=nil{t.Fatal(err)}
           reads:=0;source:=sourceFunc(func(ctx context.Context,name string,maximum int64)([]byte,error){reads++;return fileSource.Read(ctx,name,maximum)})
-          limit:=DefaultResourceLimits();limit.MaxManifestBytes=1;_,err=LoadDataSource(ctx,source,LoadPlan{Limits:limit});code(LimitExceeded,err);if reads!=1{t.Fatal("manifest limit did not stop payload reads")}
+          limit:=DefaultResourceLimits();limit.MaxManifestBytes=1;_,err=LoadDataSource(ctx,source,LoadPlan{Limits:limit});code(LimitExceeded,err);if reads!=2{t.Fatal("manifest limit did not stop payload reads")}
           limit=DefaultResourceLimits();limit.MaxRows=1;_,err=LoadDataSource(ctx,source,LoadPlan{Limits:limit,Tables:[]string{"Entry"}});code(LimitExceeded,err)
           limit=DefaultResourceLimits();limit.MaxTableBytes=1;_,err=LoadDataSource(ctx,source,LoadPlan{Limits:limit,Tables:[]string{"Lookup"}});code(LimitExceeded,err)
           for _,item:=range [][2]string{{"array","Values[1]"},{"matrix","Shape[2]"},{"dictionary","Mapping[0].value"},{"polymorphic","Action.Amount"}}{malformed,e:=LoadData(ctx,root+"-json-field-"+item[0],LoadPlan{Mode:LazyRowsOnAccess,Tables:[]string{"Entry"},PreferJSON:true});if e!=nil{t.Fatal(e)};table,_:=malformed.Get_Entry();_,e=table.Load(ctx,"east",1);code(InvalidValue,e);var failure *ConfigError;if !errors.As(e,&failure)||failure.Field!=item[1]{t.Fatal("Field path",item,e)}}
@@ -794,7 +794,7 @@ public static class ServerConsumer {
           limited,err:=LoadDataSource(ctx,source,LoadPlan{Limits:limit,Mode:LazyRowsOnAccess,Tables:[]string{"Lookup"}});if err!=nil{t.Fatal(err)};limitedRows,_:=limited.Get_Lookup();_,err=limitedRows.Load(ctx,10);if err!=nil{t.Fatal(err)}
           for i:=0;i<2;i++{_,err=limitedRows.Load(ctx,20);code(LimitExceeded,err)};d:=limited.Diagnostics();if d.DecodedRows!=1||d.ActiveDecodes!=0||d.PendingJobs!=0||d.PendingWaiters!=0||d.FaultedRows!=0||d.Health!="Healthy"||d.ReadBytes<=d.RetainedRawBytes{t.Fatal("bad limit accounting",d)}
           if bad.Diagnostics().FaultedRows!=1||bad.Diagnostics().Health!="Degraded"{t.Fatal("terminal fault not counted once")}
-          reuse:=map[string][]byte{};source=sourceFunc(func(ctx context.Context,name string,maximum int64)([]byte,error){data,err:=fileSource.Read(ctx,name,maximum);reuse[name]=data;return data,err})
+          reuse:=map[string][]byte{};source=sourceFunc(func(ctx context.Context,name string,maximum int64)([]byte,error){data,err:=fileSource.Read(ctx,name,maximum);if err==nil{reuse[name]=data};return data,err})
           fixed,err:=LoadDataSource(ctx,source,LoadPlan{Mode:LazyRowsOnAccess,Tables:[]string{"Lookup"},SourceNamespace:"deployment"});if err!=nil{t.Fatal(err)};for _,data:=range reuse{for i:=range data{data[i]=0}}
           fixedRows,_:=fixed.Get_Lookup();fixedRow,err:=fixedRows.Load(ctx,10);if err!=nil||fixedRow.Name()!="目标"{t.Fatal("source buffer reuse corrupted captured version",err)}
           memoryFiles:=map[string][]byte{};for name:=range reuse{data,err:=fileSource.Read(ctx,name,1<<30);if err!=nil{t.Fatal(err)};memoryFiles[name]=data};memory,err:=NewMemoryConfigSource(memoryFiles);if err!=nil{t.Fatal(err)};for _,data:=range memoryFiles{for i:=range data{data[i]=0}}
@@ -1021,7 +1021,7 @@ public static class ServerConsumer {
           local reads=0;local source={capabilities={verified_paths=false},read=function(...)reads=reads+1;return file.read(...)end}
           code('UnsupportedCapability',function()D.load_source(source,{require_verified_paths=true})end);assert(reads==0)
           code('LimitExceeded',function()D.load_source({read=function()return 'xx'end},{limits={max_manifest_bytes=1}})end)
-          local manifest=file.read('current.json',1<<30,token);local version=R.parse(manifest).versionId;local path='versions/'..version..'/Lookup.bytes'
+          local manifest=file.read('current.json',1<<30,token);local version=R.parse(manifest).versionId;local path='Lookup.bytes'
           local files={['current.json']=manifest,[path]=file.read(path,1<<30,token)};local memory=R.memory_source(files);files[path]='corrupt'
           code('LimitExceeded',function()D.load_source(file,{mode='LazyRowsStrict',tables={'Lookup'},limits={max_estimated_decoded_bytes=1}},token)end)
           for _,json in ipairs({false,true})do local capped=D.load_source(file,{mode='LazyRowsOnAccess',tables={'Entry'},prefer_json=json,limits={max_estimated_index_bytes=1}},token);for i=1,2 do code('BudgetExceeded',function()capped.get_Entry().load_group_ById(1,token)end)end;assert(capped.diagnostics().estimated_index_bytes==0 and capped.loaded_row_count()==0)
@@ -1173,7 +1173,7 @@ public static class ServerConsumer {
                 auto indexed=data::Snapshot::load(file,LoadSettings(plan),token);indexed->load_group_Entry_ById(1,token);auto estimate=indexed->diagnostics().estimated_index_bytes;indexed->load_group_Entry_ById(1,token);check(estimate>0&&indexed->diagnostics().estimated_index_bytes==estimate);}
               {LoadPlan plan;plan.mode=LoadMode::LazyRowsOnAccess;plan.tables=std::vector<std::string>{"Entry"};plan.prefer_json=true;auto broken=data::Snapshot::load(std::string(argv[1])+"-json-field-array",plan,token);fails(ErrorCode::InvalidValue,[&]{broken->load_group_Entry_ById(1,token);});check(broken->diagnostics().estimated_index_bytes==0&&broken->diagnostics().pending_jobs==0);}
               LoadPlan plan;plan.mode=LoadMode::LazyRowsOnAccess;plan.tables=std::vector<std::string>{"Lookup"};LoadSettings settings(plan);settings.with_limits(ResourceLimits::builder().max_decoded_rows(1).build()).with_source_namespace("memory-test");
-              auto bytes=file.read("current.json",1ull<<30,token);auto manifest=parse_json(std::string(bytes.begin(),bytes.end()));auto path="versions/"+manifest.field("versionId").string()+"/Lookup.bytes";
+              auto bytes=file.read("current.json",1ull<<30,token);auto manifest=parse_json(std::string(bytes.begin(),bytes.end()));std::string path="Lookup.bytes";
               std::unordered_map<std::string,std::vector<std::uint8_t>> files{{"current.json",bytes},{path,file.read(path,1ull<<30,token)}};
               std::shared_ptr<const data::Snapshot> snapshot;{MemoryConfigSource memory(files);for(auto& entry:files)std::fill(entry.second.begin(),entry.second.end(),0);snapshot=data::Snapshot::load(memory,settings,token);}
               check(snapshot->source_namespace()=="memory-test"&&snapshot->manifest_digest().size()==64);auto diagnostics=snapshot->diagnostics();check(diagnostics.declared_rows==2&&diagnostics.decoded_rows==0&&diagnostics.read_bytes>diagnostics.retained_raw_bytes);
@@ -1359,8 +1359,7 @@ public static class ServerConsumer {
             {let plan=LoadPlan{mode:LoadMode::LazyRowsOnAccess,tables:Some(vec!["Entry".to_owned()]),prefer_json:true,..LoadPlan::default()};let broken=zrconfig::data::Snapshot::load(std::path::Path::new(&format!("{}-json-field-array",root.display())),&plan,&token).unwrap();code(broken.load_group_Entry_ById(1,&token),ErrorCode::InvalidValue);assert_eq!(broken.diagnostics().unwrap().estimated_index_bytes,0);assert_eq!(broken.diagnostics().unwrap().pending_jobs,0);}
             let settings=LoadSettings::new(plan.clone()).with_limits(ResourceLimits::builder().max_decoded_rows(1).build().unwrap()).with_source_namespace("memory-test");
             let mut buffers=std::collections::HashMap::new();buffers.insert("current.json".to_owned(),file.read("current.json",1<<30,&token).unwrap());
-            let manifest=zrconfig::runtime::parse_json(std::str::from_utf8(&buffers["current.json"]).unwrap()).unwrap();let version=manifest.field("versionId").unwrap().string().unwrap();
-            let path=format!("versions/{}/Lookup.bytes",version);buffers.insert(path.clone(),file.read(&path,1<<30,&token).unwrap());
+            let path=String::from("Lookup.bytes");buffers.insert(path.clone(),file.read(&path,1<<30,&token).unwrap());
             let memory=MemoryConfigSource::new(buffers).unwrap();let snapshot=zrconfig::data::Snapshot::load_source(&memory,&settings,&token).unwrap();drop(memory);
             assert_eq!(snapshot.source_namespace(),"memory-test");assert_eq!(snapshot.manifest_digest().len(),64);
             let diagnostics=snapshot.diagnostics().unwrap();assert_eq!(diagnostics.declared_rows,2);assert_eq!(diagnostics.decoded_rows,0);assert!(diagnostics.read_bytes>diagnostics.retained_raw_bytes);

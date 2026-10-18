@@ -136,7 +136,7 @@ public final class ConfigRuntime {
         }
         public byte[] read(String name,long maximum,Cancellation cancellation){
             cancellation.check();relativePath(name);if(maximum<=0)throw new ConfigException(ErrorCode.InvalidPlan,"Invalid byte limit");
-            byte[] data=files.get(name);if(data==null)throw new ConfigException(ErrorCode.ReadFailed,"Missing source file: "+name);
+            byte[] data=files.get(name);if(data==null)throw new ConfigException(ErrorCode.ReadFailed,"Missing source file: "+name,"read",0,new java.io.FileNotFoundException(name));
             if(data.length>maximum)throw new ConfigException(ErrorCode.LimitExceeded,"Source file exceeds limit");return data.clone();
         }
     }
@@ -768,6 +768,7 @@ public final class ConfigRuntime {
     public static final class Bundle {
         public final String version;
         private final Path folder;
+        private final String prefix;
         private final String target;
         private final ConfigSource source;
         private final Cancellation cancellation;
@@ -775,14 +776,20 @@ public final class ConfigRuntime {
         final String manifestDigest;
         LoadBudget budget(){return budget;}
         private final Map<String, Object> entries = new HashMap<>();
-        public Bundle(Path root) throws IOException {this(root,null,null,null,Files.readAllBytes(root.resolve("current.json")));}
-        Bundle(ConfigSource source,ResourceLimits limits,Cancellation cancellation)throws IOException{this(null,source,limits,cancellation,capture(source,"current.json",limits.maxManifestBytes,cancellation));}
+        public Bundle(Path root) throws IOException {this(root,null,null,null,Files.readAllBytes(root.resolve(Files.exists(root.resolve("Common/current.json"))?"Common/current.json":"current.json")));}
+        Bundle(ConfigSource source,ResourceLimits limits,Cancellation cancellation)throws IOException{this(null,source,limits,cancellation,manifestBytes(source,limits.maxManifestBytes,cancellation));}
+        private static byte[] manifestBytes(ConfigSource source,long limit,Cancellation cancellation)throws IOException{
+            try{return capture(source,"Common/current.json",limit,cancellation);}
+            catch(ConfigException error){if(!missingManifest(error))throw error;return capture(source,"current.json",limit,cancellation);}
+        }
+        private static boolean missingManifest(Throwable error){for(Throwable cause=error;cause!=null;cause=cause.getCause())if(cause instanceof java.nio.file.NoSuchFileException||cause instanceof java.io.FileNotFoundException||cause instanceof ConfigException own&&own.code==ErrorCode.SourceUnavailable)return true;return false;}
+        private String tablePath(String file){return prefix+(prefix.equals("Tables/")?(file.endsWith(".json")?"json/":"bytes/"):"")+file;}
         private static byte[] capture(ConfigSource source,String name,long limit,Cancellation cancellation)throws IOException{
             try{cancellation.check();byte[] data=source.read(name,limit,cancellation);if(data==null)throw new ConfigException(ErrorCode.ReadFailed,"Source returned null");cancellation.check();if(data.length>limit)throw new ConfigException(ErrorCode.LimitExceeded,"Source exceeded byte limit");return data.clone();}
             catch(IOException failure){throw locateRead(new ConfigException(ErrorCode.ReadFailed,failure.getMessage(),"read",0,failure),name);}
             catch(ConfigException failure){throw locateRead(failure,name);}
         }
-        private static ConfigException locateRead(ConfigException failure,String name){String[] parts=name.split("/");String file=parts[parts.length-1];int dot=file.lastIndexOf('.');return failure.locate("read",parts.length==3?parts[1]:"",parts.length==3?(dot<0?file:file.substring(0,dot)):"","","",name);}
+        private static ConfigException locateRead(ConfigException failure,String name){String[] parts=name.split("/");String file=parts[parts.length-1];int dot=file.lastIndexOf('.');return failure.locate("read",parts.length==3&&parts[0].equals("versions")?parts[1]:"",parts.length==3?(dot<0?file:file.substring(0,dot)):"","","",name);}
         private Bundle(Path root,ConfigSource source,ResourceLimits limits,Cancellation cancellation,byte[] bytes){
             this.source=source;this.cancellation=cancellation;budget=limits==null?null:new LoadBudget(limits);if(budget!=null)budget.read(bytes.length);
             try{manifestDigest=HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes));}catch(NoSuchAlgorithmException error){throw new IllegalStateException(error);}
@@ -794,7 +801,10 @@ public final class ConfigRuntime {
             if (!Set.of("ZrConfig.Binary/1", "ZrConfig.Json/1", "ZrConfig.Mixed/1").contains(format))
                 throw new ConfigException(ErrorCode.UnsupportedFormat,"Unsupported manifest format");
             version = segment(manifestText(field(manifest, "versionId")));
-            folder = root==null?null:root.resolve("versions").resolve(version);
+            Object layout=object(manifest).get("layout");
+            if(layout!=null&&!layout.equals("")&&!layout.equals("flat")&&!layout.equals("grouped"))throw invalid("Unsupported data layout");
+            prefix="grouped".equals(layout)?"Tables/":"flat".equals(layout)?"":"versions/"+version+"/";
+            folder=root;
             for (Object entry : array(field(manifest, "tables"))) {
                 String name = segment(manifestText(field(entry, "name")));
                 String suffix = format.equals("ZrConfig.Json/1") ? ".json" : ".bytes";
@@ -840,7 +850,7 @@ public final class ConfigRuntime {
             Map<String, Object> e = object(entry);
             boolean alternate = preferJson && e.get("jsonFile") instanceof String;
             String file = segment(string(field(entry, alternate ? "jsonFile" : "file")));
-            byte[] bytes = Files.readAllBytes(folder.resolve(file));
+            byte[] bytes = Files.readAllBytes(folder.resolve(tablePath(file)));
             String expected = string(field(entry, alternate ? "jsonSha256" : "sha256"));
             try {
                 if (!HexFormat.of()
@@ -861,12 +871,12 @@ public final class ConfigRuntime {
             boolean alternate = preferJson && object(entry).get("jsonFile") instanceof String;
             String file = segment(string(field(entry,alternate ? "jsonFile" : "file")));
             if(budget!=null)budget.rows((int)integer(field(entry,"rows"),0,MAX_ROWS));
-            byte[] bytes = source==null?Files.readAllBytes(folder.resolve(file)):capture(source,"versions/"+version+"/"+file,budget.readLimit(),cancellation);if(budget!=null)budget.read(bytes.length);
+            byte[] bytes = source==null?Files.readAllBytes(folder.resolve(tablePath(file))):capture(source,tablePath(file),budget.readLimit(),cancellation);if(budget!=null)budget.read(bytes.length);
             try {
                 if (!HexFormat.of().formatHex(MessageDigest.getInstance("SHA-256").digest(bytes)).equalsIgnoreCase(string(field(entry,alternate ? "jsonSha256" : "sha256"))))
                     throw new ConfigException(ErrorCode.IntegrityMismatch,"Digest mismatch: " + name);
             } catch (NoSuchAlgorithmException error) { throw new IllegalStateException(error); }
-            IndexedRows rows = new IndexedRows(definition,bytes,file.endsWith(".json"),budget);rows.version=version;rows.relativePath="versions/"+version+"/"+file;
+            IndexedRows rows = new IndexedRows(definition,bytes,file.endsWith(".json"),budget);rows.version=version;rows.relativePath=tablePath(file);
             if (rows.count != integer(field(entry,"rows"),0,MAX_ROWS)) throw new ConfigException(ErrorCode.InvalidValue,"Row count mismatch");
             return rows;
         }

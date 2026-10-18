@@ -177,7 +177,7 @@ namespace ZrConfig.Runtime
 
                 token.ThrowIfCancellationRequested();
                 ThrowIfInvalid();
-                table = new TableState(this, codec, entry, "versions/" + _version + "/" + entry.file);
+                table = new TableState(this, codec, entry, string.IsNullOrEmpty(entry.relativePath) ? "versions/" + _version + "/" + entry.file : entry.relativePath);
                 _entries.Add(type, table);
                 return table;
             }

@@ -63,6 +63,8 @@ public static class OperationReport
                 result.NeedsGeneration,
                 result.CodeCommitted,
                 published = result.Export?.Published ?? false,
+                reusedVersion = result.Export?.ReusedVersion ?? false,
+                updatedTables = result.Export?.UpdatedTables ?? 0,
                 runId = result.Export?.RunId,
                 versionId = result.Export?.VersionId,
                 inputFingerprint = result.Export?.InputFingerprint,

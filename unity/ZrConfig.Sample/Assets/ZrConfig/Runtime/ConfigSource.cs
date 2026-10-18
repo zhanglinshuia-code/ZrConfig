@@ -196,12 +196,14 @@ namespace ZrConfig.Runtime
         public string format = "";
         public string target = "";
         public string versionId = "";
+        public string layout = "";
         public ConfigManifestTable[] tables = Array.Empty<ConfigManifestTable>();
     }
 
     [Serializable]
     public sealed class ConfigManifestTable
     {
+        internal string relativePath = "";
         public string name = "";
         public string file = "";
         public int rows;

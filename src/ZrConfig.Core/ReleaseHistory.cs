@@ -4,13 +4,17 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.Json.Serialization;
 using ZrConfig.Runtime;
 using ZrConfig.Validation;
 
 namespace ZrConfig.Core;
 
 public sealed record ReleaseTable(string Name, string File, int Rows, string SchemaHash, string Sha256, string? JsonFile = null, string? JsonSha256 = null);
-public sealed record ReleaseManifest(string Format, string Target, string VersionId, DateTime CreatedUtc, ReleaseTable[] Tables, string? CodeFingerprint = null);
+public sealed record ReleaseManifest(string Format, string Target, string VersionId, [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DateTime CreatedUtc, ReleaseTable[] Tables, string? CodeFingerprint = null)
+{
+    public string? Layout { get; init; }
+}
 public sealed record ReleaseInfo(string VersionId, DateTime CreatedUtc, string Target, int Tables, long Bytes,
     bool Current, bool Pinned, bool Managed, string? Problem);
 public sealed record TableDifference(string Table, string Change, int BeforeRows, int AfterRows, long BeforeBytes, long AfterBytes, bool SchemaChanged);
@@ -105,7 +109,14 @@ public static class ReleaseHistory
 
     public static ReleaseManifest? TryReadCurrent(string outputFolder)
     {
-        string path = Path.Combine(outputFolder, "current.json");
+        string path = Path.Combine(outputFolder, "Common", "current.json");
+        if (File.Exists(path)) return ReadManifest(path);
+        foreach (string language in new[] { "csharp", "java", "go", "cpp", "lua", "typescript", "rust" })
+        {
+            path = Path.Combine(outputFolder, ExportOptions.LanguageDirectory(language), "Common", "current.json");
+            if (File.Exists(path)) return ReadManifest(path);
+        }
+        path = Path.Combine(outputFolder, "current.json");
         return File.Exists(path) ? ReadManifest(path) : null;
     }
 
@@ -370,10 +381,11 @@ public static class ReleaseHistory
         }
     }
 
-    private static void VerifyFiles(string folder, ReleaseManifest manifest)
+    private static void VerifyFiles(string folder, ReleaseManifest manifest, CancellationToken cancellationToken = default)
     {
         foreach (ReleaseTable table in manifest.Tables)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (table == null)
             {
                 throw new InvalidDataException("Invalid null table manifest.");
@@ -409,11 +421,11 @@ public static class ReleaseHistory
         return result.ToArray();
     }
 
-    private static ReleaseManifest ReadManifest(string path)
+    internal static ReleaseManifest ReadManifest(string path)
     {
         RejectLinks(path);
         ReleaseManifest manifest = JsonSerializer.Deserialize<ReleaseManifest>(File.ReadAllText(path), JsonOptions) ?? throw new InvalidDataException("Manifest missing.");
-        if (manifest.Format is not ("ZrConfig.Binary/1" or "ZrConfig.Json/1" or "ZrConfig.Mixed/1") || manifest.Target is not ("C" or "S") || manifest.Tables == null)
+        if (manifest.Format is not ("ZrConfig.Binary/1" or "ZrConfig.Json/1" or "ZrConfig.Mixed/1") || manifest.Target is not ("C" or "S") || manifest.Tables == null || manifest.Layout is not (null or "" or "flat" or "grouped"))
         {
             throw new InvalidDataException("Unsupported release manifest.");
         }

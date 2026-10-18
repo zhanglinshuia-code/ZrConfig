@@ -31,7 +31,7 @@ bash scripts/dotnet.sh run --project src/ZrConfig.Cli -p:NuGetAudit=false -- \
 
 以上命令从仓库根目录执行，将项目路径替换为实际文件。Windows 使用 `dotnet run --project src/ZrConfig.Cli -p:NuGetAudit=false --` 并将参数写在同一行。共用示例已设置七语言、`both`、C 端和 `server-v1`，体验示例时直接使用 `samples/project.zrconfig.json`，无需改动其目标端或语言集。
 
-`--accept-changes` 沿用原有含义：核对预览后，允许删除退役生成文件或调整输入根目录。`export` 不带 `--generate` 不会更改源码；更改语言列表后应先生成。`validate` 检查选定语言的生成文件是否过期，不会调用外部编译器。构建 Java/Go/C++ 应在对应业务工程或验收环境完成。
+`--accept-changes` 沿用原有含义：核对预览后，允许删除退役生成文件或调整输入根目录。`export` 不带 `--generate` 不会更改源码。App 生成和导出、CLI `codegen`、`export --generate` 和 `validate` 默认检查当前选择与已接受基线中的全部语言；缩小勾选范围不会删除已有语言，也不会单独触发 API 迁移。新增语言需要生成其代码。明确移除已有语言须使用 `codegen --prune-languages --languages <保留语言>` 并完成 API 迁移；预览、`--verify-api` 验收和 `--accept-api-change` 提交三步均须保留 `--prune-languages`，`--accept-changes` 不会绕过接口保护。该清理参数不保存到项目配置，也不适用于导出或只校验。`validate` 检查这些生成文件是否过期，不会调用外部编译器。构建 Java/Go/C++ 应在对应业务工程或验收环境完成。
 
 ### 公开接口保护与显式迁移
 
@@ -181,13 +181,13 @@ public readonly struct Money
 }
 ```
 
-每个版本仍发布到 Output/versions/版本号，最后原子替换 current.json。清单格式分别为 `ZrConfig.Binary/1`、`ZrConfig.Json/1`、`ZrConfig.Mixed/1`：
+数据按所选语言归类：`Output/CSharp/Tables/bytes/Hero.bytes`、`Output/CSharp/Tables/json/Hero.json`，清单位于 `Output/CSharp/Common/current.json`。Java、Go、Cpp、Lua、TypeScript、Rust 使用同样结构。清单标记 `layout: "grouped"`，加载器以对应语言目录为根目录；只更新本次选中的语言。仍支持读取旧版 flat 和版本目录。每次完整校验后，仅替换内容变化、缺失或损坏的文件，最后提交清单；未改文件的内容与修改时间不变。不再创建版本目录或数据历史，旧版目录仍可读取。确定性的 `versionId` 仅作为内容校验和运行时缓存标识，不用于创建目录。固定目录的磁盘文件会被覆盖：先完成导出再重载，持有旧清单的懒加载器须先重载再读取已变化的文件。清单格式分别为 `ZrConfig.Binary/1`、`ZrConfig.Json/1`、`ZrConfig.Mixed/1`：
 
 - binary：每表 `.bytes`，清单 file / sha256 指向二进制。
 - json：每表 `.json`，file / sha256 指向 JSON。
 - both：同一版本同时包含两者；file / sha256 指向二进制，jsonFile / jsonSha256 指向 JSON。
 
-所有格式都校验表名、结构哈希、文件 SHA-256、行数、主键和引用；SHA-256 用于完整性检查，不是签名认证。格式未知、文件损坏或结构不匹配时不会静默回退到另一份数据。版本回滚会校验两份文件，要求与接入方部署清单兼容；示例部署也复制两种格式。
+所有格式都校验表名、结构哈希、文件 SHA-256、行数、主键和引用；SHA-256 用于完整性检查，不是签名认证。格式未知、文件损坏或结构不匹配时不会静默回退到另一份数据。示例部署校验两份文件，并在固定目录中更新两种格式。
 
 六种原生快照加载入口还会在读取任何表内容前比较清单与生成表的完整集合。额外表、缺表、同数量但替换了表名都会失败；重复表仍由清单解析拒绝。失败不会替换当前快照。下列传统 `ConfigSnapshot` / `ConfigManager` 入口保留同步全量加载语义；按表选择、按行加载及 Clear/Close 使用后文的服务器契约入口。
 

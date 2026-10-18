@@ -1569,7 +1569,7 @@ bash scripts/dotnet.sh run --project src/ZrConfig.Cli -- codegen --project sampl
 bash scripts/dotnet.sh run --project src/ZrConfig.Cli -- export --project samples/project.zrconfig.json --target C --generate
 ```
 
-服务端将 `--target C` 改成 `--target S`。Windows 的 `ZrConfig.Cli.exe` 使用相同参数。一次操作只生成和发布所选端，`Generated` 与 `Output/current.json` 表示当前这次操作的结果；需要同时交付两端时，各端使用实际项目的代码和输出路径，不能把同一份生成代码当作两套模型共用。正式示例继续共用现有 Data、Config、Rules、Output，未增加平行示例目录。
+服务端将 `--target C` 改成 `--target S`。Windows 的 `ZrConfig.Cli.exe` 使用相同参数。一次操作只生成和发布所选端，`Generated` 与 `Output/<语言>/Common/current.json` 表示当前这次操作的结果；需要同时交付两端时，各端使用实际项目的代码和输出路径，不能把同一份生成代码当作两套模型共用。正式示例继续共用现有 Data、Config、Rules、Output，未增加平行示例目录。
 
 生成的字段、构造函数、编解码器与查询接口均按端一致；所有表的结构哈希包含目标端，使用另一端代码直接导出会报 `SCHEMA_MISMATCH` 并保留当前发布版本。`current.json` 增加 `target`（C/S），便于交付核对。旧生成代码需重新生成后使用。
 
@@ -1713,7 +1713,7 @@ YourUnityProject/
 
 - Config 根目录选择 `YourUnityProject/Assets/Config`。
 - Rules 目录选择 `YourUnityProject/Rules`。
-- 输出目录选择 `YourUnityProject/Output`。部署时只将 current.json 及其引用的 bytes 放入 `Assets/StreamingAssets/ZrConfig`，保留版本相对路径。
+- 输出目录选择 `YourUnityProject/Output`。部署时只将 current.json 及其引用的 bytes 放入 `Assets/StreamingAssets/ZrConfig`，保留 Common 和 Tables 相对路径。
 - 首次生成后等 Unity 编译结束，再进入 Play。
 
 规则放在 Assets 外，能避免它们被游戏 Player 编译，也避免游戏程序集不需要的规则依赖。规则仍由导表 App 动态编译执行。
@@ -1730,7 +1730,7 @@ YourUnityProject/
 
 1. 按 [示例说明](../samples/README.md) 导出整套 samples/Data（九张表，包含万行用例），确认 0 错误。
 2. 按上一节接入 Assets/ZrConfig 源码，把 unity/ZrConfig.Sample/Assets/HotUpdate/Config 下的 CustomTypes、Serialization、Generated 三个源码目录放进 Unity 的 Assets/Config；保持一套源码和唯一的 TableCodecs。
-3. 按 samples/Output/current.json 的清单，将全部引用的 `.bytes` / `.json` 表数据复制到 Assets/StreamingAssets/ZrConfig 下对应版本路径，最后复制 current.json；不复制日志、编译缓存、发布记录和 `.rows.json`。仓库示例可直接用 `unity-sample` 完成部署。
+3. 按 samples/Output/CSharp/Common/current.json 的清单，将全部引用的 `.bytes` / `.json` 表数据复制到 Assets/StreamingAssets/ZrConfig 下对应的 Tables/json 或 Tables/bytes 路径，最后复制 current.json；不复制日志、编译缓存、发布记录和 `.rows.json`。仓库示例可直接用 `unity-sample` 完成部署。
 4. 等 Unity 编译完成，再添加下面的读取脚本。
 
 项目已有配置时，使用自己项目的一套 Data/Config/Rules；不要把正式示例或第 12 章的同名表混入。
@@ -1828,10 +1828,10 @@ public sealed class HeroConfigReader : MonoBehaviour
 ReloadConfiguration 可以绑定到 UI Button。本例读取的是 Unity 工程中的 StreamingAssets 副本，每次只修改数据时按以下顺序更新：
 
 1. 保存 Excel，重新导出到 samples/Output，确认成功。
-2. 先将本次 current.json 引用的全部 `.bytes` / `.json` 表数据复制到 `Assets/StreamingAssets/ZrConfig` 下对应的 `versions/<版本号>/` 路径，完成后再替换 `Assets/StreamingAssets/ZrConfig/current.json`；管理记录和差异快照留在 Output。
+2. 先将本次 current.json 引用的全部 `.bytes` / `.json` 表数据复制到 `Assets/StreamingAssets/ZrConfig/Tables/json` 或 `Tables/bytes` 目录，完成后再替换 `Assets/StreamingAssets/ZrConfig/Common/current.json`；诊断日志留在 Output。
 3. 点击 ReloadConfiguration 按钮，重新读取该清单和数据。只更新 samples/Output 而未同步上述文件时，按钮仍会加载旧版本。
 
-仓库 Editor 示例直接读取共享的 samples/Output；Player 使用筛选部署后的 StreamingAssets 数据。若改了表结构或类型，还需同步 Config 中对应源码、等待 Unity 编译完成，再重新进入 Play 验证；数据重载不会更新已经编译的 C# 类型。
+仓库 Editor 示例直接读取 samples/Output/CSharp；Player 使用筛选部署后的 StreamingAssets 数据。若改了表结构或类型，还需同步 Config 中对应源码、等待 Unity 编译完成，再重新进入 Play 验证；数据重载不会更新已经编译的 C# 类型。
 
 初学解释：
 
@@ -1997,7 +1997,7 @@ HeroConfig hero = await snapshot.GetHeroAsync(1, token);
 SkillConfig skill = hero == null ? null : await hero.GetSkillAsync(token);
 ```
 
-默认根路径为 `Application.streamingAssetsPath + "/ZrConfig"`，也可向构造函数传入实际根路径。资源接口接收相对路径，例如 `current.json`、`versions/v某版本/Hero.bytes`；适配器检查路径并用 UnityWebRequest 异步读取，支持取消和请求失败报告。`ReadCount` 与 `Trace` 可观察实际请求，`CoalescingConfigSource` 合并同一路径的并发读取。
+默认根路径为 `Application.streamingAssetsPath + "/ZrConfig"`，也可向构造函数传入实际根路径。资源接口接收相对路径，例如 `Common/current.json`、`Tables/bytes/Hero.bytes`；适配器检查路径并用 UnityWebRequest 异步读取，支持取消和请求失败报告。`ReadCount` 与 `Trace` 可观察实际请求，`CoalescingConfigSource` 合并同一路径的并发读取。
 
 适配器须在 Unity 主线程构造和调用，不配置后台加载调度器，也不阻塞等待异步操作。它只实现 `IConfigSource`：首次查询和未缓存的跨表引用使用 `GetHeroAsync`、`GetSkillAsync` 等异步入口；已缓存数据可同步查询。不能直接照搬桌面例子中的 `hero.Skill` 来读取尚未加载的资源。重新加载仍使用 `ReloadAsync`，全量检查后切换使用带 `TableCodecs.Registry` 的全量入口。
 
@@ -2040,7 +2040,7 @@ SkillConfig skill = await hero.GetSkillAsync(token);
 Debug.Log(skill?.Name);
 ```
 
-`source` 为绑定了两个读取函数的适配器，`token` 为调用方取消令牌。清单与表使用 `current.json`、`versions/<版本号>/<清单中的表文件名>` 相对路径，由桥接函数映射到资源地址。返回实际字节，不返回 URL 或文本。回调式 AB API 可用 `ConfigCompletionSource<byte[]>` 桥接：成功、失败、取消分别完成结果；不要用同步读取伪装异步，也不要轮询或阻塞等待 AB 操作。
+`source` 为绑定了两个读取函数的适配器，`token` 为调用方取消令牌。清单与表使用 `Common/current.json`、`Tables/bytes/<表名>.bytes` 或 `Tables/json/<表名>.json` 相对路径，由桥接函数映射到资源地址。返回实际字节，不返回 URL 或文本。回调式 AB API 可用 `ConfigCompletionSource<byte[]>` 桥接：成功、失败、取消分别完成结果；不要用同步读取伪装异步，也不要轮询或阻塞等待 AB 操作。
 
 通用委托适配器只转交读取调用。可在外层使用 `CoalescingConfigSource`（异步）或 `CoalescingSyncConfigSource`（双入口）合并同路径在途请求并隔离调用方取消；完成即移除，不缓存清单或失败结果。示例 `SampleAbResources.Source` 已包装双入口合并器。路径映射、下载、资源句柄释放和稳定字节取得仍由接入项目按框架能力处理。返回的托管字节在配置快照使用期间必须保持有效且不可修改；释放框架句柄不能回收或覆盖这份数据。
 
@@ -2088,7 +2088,7 @@ private void OnConfigChanged(ConfigSnapshot snapshot)
 
 ### 14.8 热更新项目要同步哪些内容
 
-只改数据：发布新的完整数据版本和对应 current.json。
+只改数据：覆盖所选语言目录中变化的表文件，并更新 Common/current.json。
 
 改字段、手写成员、枚举、子类集合或转换器：重新生成并编译对应 Config/Codec，导出新数据，按你的热更新流程同时发布代码与数据。
 
@@ -2110,7 +2110,7 @@ Odin 适配依据官方 [PropertyTree](https://odininspector.com/documentation/s
 
 ### 14.10 普通 .NET 接入
 
-不使用 Unity 时可直接使用 ConfigManager，并注入清单解析函数。下面放进已有异步初始化方法，configOutputFolder 为实际输出根目录；普通查询不需要注册表：
+不使用 Unity 时可直接使用 ConfigManager，并注入清单解析函数。下面放进已有异步初始化方法，configOutputFolder 为所需语言目录，例如 Output/CSharp；普通查询不需要注册表：
 
 ```csharp
 using System.Text.Json;

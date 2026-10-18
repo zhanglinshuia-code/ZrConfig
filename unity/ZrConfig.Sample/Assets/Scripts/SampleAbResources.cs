@@ -43,7 +43,7 @@ namespace ZrConfig.Sample
             try
             {
                 // AB 替换点：用 address 调用正式框架的同步资源接口并取得 byte[]。
-                // 临时实现将 ZrConfig/ 地址前缀映射到 RootFolder，保留版本子路径。
+                // 临时实现将 ZrConfig/ 地址前缀映射到 RootFolder，保留清单提供的相对文件路径。
                 byte[] bytes = _localFiles.Read(relativePath, token);
                 Trace?.Invoke("同步完成 ← " + address + " · " + bytes.Length + " B");
                 return bytes;

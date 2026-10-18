@@ -91,7 +91,7 @@ Click “Save project configuration” as project.zrconfig.json, preferably at p
 
 All four fields accept folders. Dropped files use their parent; multiple files must share a directory or the value stays unchanged. Dragging sets paths without moving files. Paths lock during generation/export.
 
-Generation languages select one or more code outputs. Data format selects Binary, JSON, or both and is saved with the project. These differ from UI language and C/S target. Samples use all seven languages, dual-format, and C; retain project settings routinely. Developers review language/side/API changes via [multi-language migration](server-generation.en.md); ordinary generation confirmation cannot approve breaking APIs.
+Generation languages select one or more code outputs. Data format selects Binary, JSON, or both and is saved with the project. These differ from UI language and C/S target. Samples use all seven languages, dual-format, and C. With existing multi-language code, selecting only C# or another language allows both generation and export: generation, export, and validation preserve existing languages and check whether their code needs updating. Deselecting a language does not delete its APIs. First-time generation and added languages follow the selection. To remove an existing language, developers use CLI `codegen --prune-languages` and review the changes via [multi-language migration](server-generation.en.md). Breaking language-removal, target-side, or API changes still require a separate review; ordinary generation confirmation cannot approve them.
 
 ### 2.1 Remembered paths and language
 
@@ -344,34 +344,35 @@ This shows Binary + JSON. Binary alone emits .bytes tables; JSON alone emits .js
 
 ```text
 Output/
-  current.json                 Entry manifest for the current valid version
-  versions/
-    v<run-id>/
-      AllTypes.bytes           Binary table data (Binary / Binary + JSON)
-      JSON table data (JSON / Binary + JSON)
-      AllTypes.rows.json       Field-difference snapshot, tool management only
-      manifest.json            Independent version manifest
-      release.json             Release record, fingerprints, change summary
-      schema.json              Table schema summary
-      diagnostics.json         Candidate diagnostics
-      ...
+  CSharp/
+    Tables/
+      json/                    JSON table files: Hero.json, Skill.json, ...
+      bytes/                   Binary table files: Hero.bytes, Skill.bytes, ...
+    Common/
+      current.json             Table manifest and integrity hashes
+  Java/                        Same structure for each selected language
+  Go/                          Also Cpp, Lua, TypeScript, Rust
   Logs/
-    export.log                 Current run log
+    export.log                 Latest run log
     diagnostics.json           Latest structured checks
     <run-id>/                  Per-run logs, diagnostics, and result
 ```
 
-Locks/caches are tool-managed, not game deliverables. Do not hand-edit .bytes/table .json; edit Excel.
+Data uses a fixed directory. For example, JSON mode writes `Output/CSharp/Tables/json/Hero.json`; changing Hero updates this file in place. Other tables with identical content keep their bytes and modification times. Repeated exports with no changes leave all data files and `current.json` untouched. Formatting or resaving Excel alone does not rewrite data. No new version directories, archived data copies, or row-difference snapshots are created. Existing archived version directories are preserved; after migration, use the manifest under each language’s Common folder.
 
-Deliver **current.json plus every referenced table data file**, preserving relative version paths. Dual-format requires both file/jsonFile targets. Management manifests, .rows.json, and diagnostics are not game resources. Never mix table files from versions or edit manifest file details. The tool switches only after complete new data is written/checked; failure retains old valid data.
+Every export validates the complete input and cross-table references before writing. Changed or missing/corrupt files are replaced, with the manifest written last. A write failure restores the previous files. Format switches and explicit table removals remove only obsolete files registered in the previous manifest for that language; unrelated files are preserved.
 
-Fixed logs describe the latest run; each export also keeps an independent directory. New versions have full manifests. Version history offers comparisons/pins/rollback/cleanup previews. Rollback needs actual-deployment compatibility manifests passing side/schema/source-fingerprint/hash checks. Old versions lacking metadata cannot auto-rollback. See [management](release-and-acceptance.en.md#compare-roll-back-and-clean).
+Deliver **the selected language folder, preserving its Common and Tables subdirectories**. Dual-format output requires both `.bytes` and `.json`. Logs, locks, and caches are not game data. Edit Excel, not generated files. The manifest carries a content identity for integrity and runtime caches; it is not an output version directory or history.
+
+Only selected language directories are updated. Selecting C# alone preserves other languages’ exported data. JSON mode creates only `Tables/json`, Binary only `Tables/bytes`, and dual-format output creates both. Readers use the language folder (for example `Output/CSharp`) as their root.
+
+Each run still records its diagnostics under Logs. Successful export shows the number of updated tables or “Data unchanged”.
 
 ### 7.1 Why the game has not changed after export
 
 Export only updates selected Output. The game must receive data and invoke its project's load/refresh operation; running games do not automatically read arbitrary new files.
 
-Verify version/values through project tools after delivery. Remote deployment uploads complete versions before manifests. Do not clean old versions while clients may read them. Developers handle deployment/loading/compatibility.
+Verify actual values through project tools after delivery. Finish synchronizing all changed files and the manifest before reloading. A lazy loader holding old metadata must reload the manifest before fetching changed files. Developers handle deployment/loading/compatibility.
 
 Value-only edits usually need data publication only. Table/field/type/key changes may require game-code updates; new bytes cannot simply be handed to old code.
 

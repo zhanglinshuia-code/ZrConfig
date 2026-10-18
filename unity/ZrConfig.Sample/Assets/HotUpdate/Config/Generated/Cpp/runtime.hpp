@@ -167,7 +167,7 @@ public:
     std::vector<std::uint8_t> read(const std::string& name,std::uint64_t maximum,const Cancellation& cancellation)override{
         cancellation.check();validate_source_path(name);if(!maximum)throw ConfigError(ErrorCode::InvalidPlan,"Invalid byte limit");
         try{
-            auto path=checked_path(name);if(!std::filesystem::is_regular_file(path))throw ConfigError(ErrorCode::ReadFailed,"Source is not a regular file");auto size=std::filesystem::file_size(path);auto stamp=std::filesystem::last_write_time(path);
+            auto path=checked_path(name);if(!std::filesystem::exists(path))throw ConfigError(ErrorCode::SourceUnavailable,"Source file missing");if(!std::filesystem::is_regular_file(path))throw ConfigError(ErrorCode::ReadFailed,"Source is not a regular file");auto size=std::filesystem::file_size(path);auto stamp=std::filesystem::last_write_time(path);
             if(size>maximum||size>(std::numeric_limits<std::size_t>::max)())throw ConfigError(ErrorCode::LimitExceeded,"Source file exceeds limit");
             std::ifstream input(path,std::ios::binary);if(!input)throw ConfigError(ErrorCode::ReadFailed,"Cannot open source file");std::vector<std::uint8_t> bytes(static_cast<std::size_t>(size));
             for(std::size_t position=0;position<bytes.size();){cancellation.check();auto count=std::min<std::size_t>(1u<<20,bytes.size()-position);if(!input.read(reinterpret_cast<char*>(bytes.data()+position),static_cast<std::streamsize>(count)))throw ConfigError(ErrorCode::ReadFailed,"Short source read");position+=count;}
@@ -1166,23 +1166,28 @@ class Bundle {
     friend class detail::IndexedRows;
     friend class detail::SourceBundle;
     std::filesystem::path folder_;
+    std::string prefix_;
     std::unordered_map<std::string, Json> entries_;
 
   public:
     std::string version;
     explicit Bundle(const std::filesystem::path &root) {
-        auto bytes = read_file(root / "current.json");
+        auto bytes = read_file(root / (std::filesystem::exists(root / "Common/current.json")?"Common/current.json":"current.json"));
         initialize(root,parse_json(std::string(bytes.begin(), bytes.end())));
     }
     Bundle(const std::filesystem::path& root,const Json& manifest){initialize(root,manifest);}
 private:
+    std::string table_path(const std::string& file)const{return prefix_+(prefix_=="Tables/"?(file.size()>=5&&file.substr(file.size()-5)==".json"?"json/":"bytes/"):"")+file;}
     void initialize(const std::filesystem::path& root,const Json& manifest){
         auto target=manifest.members.find("target");target_=target!=manifest.members.end()&&target->second.kind==Json::Kind::String?target->second.text:"";
         auto format = manifest.field("format").string();
         if (format != "ZrConfig.Binary/1" && format != "ZrConfig.Json/1" && format != "ZrConfig.Mixed/1")
             invalid("清单格式不支持");
         version = path_segment(manifest.field("versionId").string());
-        folder_ = root / "versions" / version;
+        auto layout=manifest.members.find("layout");
+        auto storage=layout==manifest.members.end()||layout->second.kind==Json::Kind::Null?std::string{}:layout->second.string();
+        if(!storage.empty()&&storage!="flat"&&storage!="grouped")invalid("Unsupported data layout");
+        prefix_=storage=="grouped"?"Tables/":storage=="flat"?"":"versions/"+version+"/";folder_=root;
         for (const auto &entry : manifest.field("tables").array()) {
             auto name = path_segment(entry.field("name").string());
             auto rows = integer<std::int32_t>(entry.field("rows"));
@@ -1226,7 +1231,7 @@ public:
         bool alternate =
             prefer_json && entry.members.count("jsonFile") && entry.field("jsonFile").kind == Json::Kind::String;
         auto file = path_segment(entry.field(alternate ? "jsonFile" : "file").string());
-        auto bytes = read_file(folder_ / file);
+        auto bytes = read_file(folder_ / table_path(file));
         auto expected = entry.field(alternate ? "jsonSha256" : "sha256").string();
         std::transform(expected.begin(), expected.end(), expected.begin(),
                        [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
@@ -1323,13 +1328,13 @@ class SourceBundle {
     std::vector<std::uint8_t> capture(const std::string& path,std::uint64_t maximum){
         try{return source_.read(path,maximum,cancellation_);}catch(const ConfigError& failure){
             ErrorContext context;context.relative_path=path;auto first=path.find('/'),last=path.rfind('/');
-            if(first!=std::string::npos&&last>first){context.version_id=path.substr(first+1,last-first-1);context.table=path.substr(last+1);auto dot=context.table.rfind('.');if(dot!=std::string::npos)context.table.resize(dot);}
+            if(first!=std::string::npos&&last>first){if(path.rfind("versions/",0)==0)context.version_id=path.substr(first+1,last-first-1);context.table=path.substr(last+1);auto dot=context.table.rfind('.');if(dot!=std::string::npos)context.table.resize(dot);}
             throw failure.locate("read",std::move(context));
         }
     }
 public:
     SourceBundle(ConfigSource& source,const LoadSettings& settings,const Cancellation& cancellation):source_(source),cancellation_(cancellation),budget_(std::make_shared<LoadBudget>(settings.limits())){
-        auto maximum=(std::min)(settings.limits().max_manifest_bytes(),settings.limits().max_bundle_bytes());auto bytes=capture("current.json",maximum);cancellation.check();if(bytes.size()>maximum)throw ConfigError(ErrorCode::LimitExceeded,"Source exceeded read limit");budget_->read(bytes.size());digest_=sha256(bytes);
+        auto maximum=(std::min)(settings.limits().max_manifest_bytes(),settings.limits().max_bundle_bytes());std::vector<std::uint8_t> bytes;try{bytes=capture("Common/current.json",maximum);}catch(const ConfigError& error){if(error.code!=ErrorCode::SourceUnavailable)throw;cancellation.check();bytes=capture("current.json",maximum);}cancellation.check();if(bytes.size()>maximum)throw ConfigError(ErrorCode::LimitExceeded,"Source exceeded read limit");budget_->read(bytes.size());digest_=sha256(bytes);
         std::string text(bytes.begin(),bytes.end());if(!valid_utf8(text))throw ConfigError(ErrorCode::InvalidEncoding,"Invalid manifest UTF-8");
         try{auto manifest=JsonParser(text,JsonAllocationBounds(settings.limits())).parse();const auto& format=manifest.field("format").string();if(format.empty())throw ConfigError(ErrorCode::InvalidManifest,"Empty manifest format");if(format!="ZrConfig.Binary/1"&&format!="ZrConfig.Json/1"&&format!="ZrConfig.Mixed/1")throw ConfigError(ErrorCode::UnsupportedFormat,"Unknown manifest format");if(manifest.field("tables").array().size()>settings.limits().max_tables())throw ConfigError(ErrorCode::LimitExceeded,"Too many manifest tables");metadata_=std::make_unique<Bundle>(std::filesystem::path{},manifest);}catch(const InvalidData& error){throw ConfigError(ErrorCode::InvalidManifest,error.what());}
     }
@@ -1338,7 +1343,7 @@ public:
     const std::string& manifest_digest()const noexcept{return digest_;}
     std::shared_ptr<LoadBudget> budget()const noexcept{return budget_;}
     const Json& entry(const std::string& name)const{auto found=metadata_->entries_.find(name);if(found==metadata_->entries_.end())throw ConfigError(ErrorCode::SchemaMismatch,"Missing table");return found->second;}
-    std::vector<std::uint8_t> read(const std::string& file){auto maximum=budget_->read_limit();auto bytes=capture("versions/"+version()+"/"+file,maximum);cancellation_.check();if(bytes.size()>maximum)throw ConfigError(ErrorCode::LimitExceeded,"Source exceeded read limit");budget_->read(bytes.size());return bytes;}
+    std::vector<std::uint8_t> read(const std::string& file){auto maximum=budget_->read_limit();auto bytes=capture(metadata_->table_path(file),maximum);cancellation_.check();if(bytes.size()>maximum)throw ConfigError(ErrorCode::LimitExceeded,"Source exceeded read limit");budget_->read(bytes.size());return bytes;}
 };
 }
 namespace detail {
@@ -1422,7 +1427,7 @@ public:
         std::transform(expected.begin(),expected.end(),expected.begin(),[](unsigned char c){return static_cast<char>(std::tolower(c));});
         if(sha256(bytes)!=expected)throw ConfigError(ErrorCode::IntegrityMismatch,"Table digest mismatch");
         auto result=std::unique_ptr<IndexedRows>(new IndexedRows(schema,std::move(bytes),file.size()>=5&&file.substr(file.size()-5)==".json",bundle.budget()));
-        result->version_=bundle.version();result->relative_path_="versions/"+bundle.version()+"/"+file;
+        result->version_=bundle.version();result->relative_path_=bundle.metadata().table_path(file);
         if(result->count()!=integer<std::uint32_t>(entry.field("rows")))throw ConfigError(ErrorCode::InvalidValue,"Row count mismatch");
         std::size_t raw=result->bytes_.size();
         for(const auto& part:result->fragments_)raw+=part.size();

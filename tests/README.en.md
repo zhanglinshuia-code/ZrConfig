@@ -35,6 +35,12 @@ dotnet run --project tests/ZrConfig.Server.Tests -c Release -p:NuGetAudit=false
 
 Default entry requires all six native toolchains and runs C# plus six-language contracts/consumers. Append `-- --managed-only` to dotnet run for managed-only checks; it explicitly skips native compilation and is not seven-language acceptance. `-- --api-only` runs API checks alone. Existing builds can execute tests/ZrConfig.Server.Tests/bin/Release/net10.0/ZrConfig.Server.Tests.dll directly.
 
+`-- --single-language-only` covers both C/S targets, all seven languages selected individually, first-time/repeated generation, CLI generation, and Binary/JSON/dual-format export and validation. It reports each language separately and checks preservation of existing code and API baselines when narrowing a multi-language selection, API protection for explicit CLI language pruning, and custom module settings without directories for unselected languages. It requires no external language toolchains and does not replace seven-language consumer compilation.
+
+`-- --consumers-only` runs the consumer and loader checks independently, including grouped data roots and legacy flat/version fixtures. It skips the single-language matrix; combine it with `-- --single-language-only` and `-- --stable-export-only` for focused runs.
+
+`-- --stable-export-only` checks fixed-directory per-table updates for Binary/JSON/dual-format exports, unchanged file bytes/timestamps, Excel formatting changes, data/format/target/source changes, rule revalidation, cancellation, input changes, repair of corrupt/missing data/manifests, write-failure rollback, legacy migration, and CLI messages. No external language toolchains are needed.
+
 Toolchain preflight reports each resolved path and identifies missing tools by environment variable and configured value. An invalid explicit path does not fall back to another version on PATH; setting `ZRCONFIG_TYPESCRIPT` also disables fallback to a global `tsc`. TypeScript 7 uses its native `tsc` executable (`ZRCONFIG_TSC`); 5.x/6.x continue to support `typescript.js` (`ZRCONFIG_TYPESCRIPT`). CI selects the entry point provided by the package and preserves `server-toolchains.log` with the selected paths and actual versions to diagnose minimum/current profile installation failures.
 
 Git clones may use `-- --trusted-ref <trusted-commit-SHA>` to compare API baselines/migration chains against an immutable target. Full history for that commit is required; source ZIPs lack history and omit this check. Choose a real baseline, never the candidate itself.

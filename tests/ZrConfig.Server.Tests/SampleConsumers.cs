@@ -11,6 +11,8 @@ internal static class SampleConsumers
         configuration=Path.GetFullPath(configuration);output=Path.GetFullPath(output);
         if(language=="all")
         {foreach(string item in new[]{"csharp","java","go","cpp","rust","typescript","lua"})await Run(item,configuration,output);return;}
+        string languageRoot=Path.Combine(output,ZrConfig.Core.ExportOptions.LanguageDirectory(language));
+        if(File.Exists(Path.Combine(languageRoot,"Common","current.json")))output=languageRoot;
         string root=Path.Combine(Path.GetTempPath(),"zrconfig-sample-consumer-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(root);
         try
         {

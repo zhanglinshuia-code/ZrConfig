@@ -16,8 +16,9 @@ internal sealed class GenerationFileTransaction(string root, GenerationFileOpera
 {
     private readonly string _root = Path.TrimEndingDirectorySeparator(Path.GetFullPath(root));
     private readonly GenerationFileOperations _operations = operations ?? new();
-    private readonly Dictionary<string, string?> _changes = new(StringComparer.Ordinal);
-    internal void Set(string path, string? content) => _changes.Add(Path.GetFullPath(path), content);
+    private readonly Dictionary<string, byte[]?> _changes = new(StringComparer.Ordinal);
+    internal void Set(string path, string? content) => SetBytes(path, content == null ? null : new UTF8Encoding(false).GetBytes(content));
+    internal void SetBytes(string path, byte[]? content) => _changes.Add(Path.GetFullPath(path), content);
 
     internal bool Commit(DiagnosticCollector diagnostics)
     {
@@ -29,11 +30,11 @@ internal sealed class GenerationFileTransaction(string root, GenerationFileOpera
         try
         {
             Directory.CreateDirectory(temporary);
-            foreach ((string path, string? content) in _changes)
+            foreach ((string path, byte[]? content) in _changes)
             {
                 CheckPath(path);
                 bool exists = File.Exists(path);
-                if (exists && content != null && File.ReadAllText(path) == content)
+                if (exists && content != null && File.ReadAllBytes(path).AsSpan().SequenceEqual(content))
                 {
                     continue;
                 }
@@ -50,10 +51,10 @@ internal sealed class GenerationFileTransaction(string root, GenerationFileOpera
 
                 if (content != null)
                 {
-                    File.WriteAllText(staged, content, new UTF8Encoding(false));
+                    File.WriteAllBytes(staged, content);
                 }
 
-                prepared.Add(new PreparedFile(path, exists ? backup : null, content == null ? null : staged));
+                prepared.Add(new PreparedFile(path, exists ? backup : null, content == null ? null : staged, exists ? File.GetLastWriteTimeUtc(path) : null));
             }
 
             // 回滚再次失败时，保留的备份清单可供人工恢复。
@@ -93,6 +94,7 @@ internal sealed class GenerationFileTransaction(string root, GenerationFileOpera
                     else
                     {
                         _operations.Write(file.Path, File.ReadAllBytes(file.Backup), restoring: true);
+                        if (file.Written != null) File.SetLastWriteTimeUtc(file.Path, file.Written.Value);
                     }
                 }
                 catch (Exception recovery)
@@ -188,5 +190,5 @@ internal sealed class GenerationFileTransaction(string root, GenerationFileOpera
         created.Add(path);
     }
 
-    private sealed record PreparedFile(string Path, string? Backup, string? Staged);
+    private sealed record PreparedFile(string Path, string? Backup, string? Staged, DateTime? Written);
 }

@@ -15,6 +15,8 @@ public sealed class WorkflowOperation
     internal SourceNameMapping[]? SourceMappings { get; set; }
     internal string? ApiChangeId { get; set; }
     internal ApiMigrationReceipt? MigrationReceipt { get; set; }
+    internal bool PruneLanguages { get; set; }
+    internal GenerationFileOperations? ExportFileOperations { get; set; }
     private readonly Stopwatch _clock = Stopwatch.StartNew();
     private readonly IProgress<OperationProgress>? _progress;
     public string RunId { get; } = DateTime.UtcNow.ToString("yyyyMMddTHHmmssfffZ") + "_" + Guid.NewGuid().ToString("N")[..8];

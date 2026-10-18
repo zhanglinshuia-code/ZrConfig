@@ -132,13 +132,13 @@ Select `ZrConfig Sample` to inspect loaded tables, or open `Tools → ZrConfig �
 
 Editor/desktop calls follow `ZrConfigSample → UnityConfigRuntime / generated query API → DelegateSyncConfigSource → SampleAbResources → real files`. No third-party SDK or native AssetBundle is used yet. Temporary resource code replaces only the underlying AB read; manifest validation, binary decoding, references, and caches are real.
 
-1. Enter in default asynchronous mode. Reads should contain only `ZrConfig/current.json`; 0 rows loaded.
+1. Enter in default asynchronous mode. Reads should contain only `ZrConfig/Common/current.json`; 0 rows loaded.
 2. Click “Query hero” to see asynchronous Hero.bytes/Skill.bytes requests, names, mentor, and reverse reference. Query the same hero again: 0 resource reads for that action.
 3. Switch to “Synchronous mode”, click “Reload synchronously”, then query. Requests now use synchronous reads. Switching modes alone retains caches, so already loaded objects cause no new request.
 4. Use “Null-reference example”, “Query group”, and “Query skill” for null references, full drop-table grouping, and three-component keys. Both modes support them; missing keys show no configuration found.
 5. To demonstrate synchronous initialization, exit Play, select `ZrConfig Sample`, disable `Use Async`, and Play again. Synchronous reads occupy the current thread; decoding after asynchronous reads is not automatically split across frames.
 
-[SampleAbResources.cs](../unity/ZrConfig.Sample/Assets/Scripts/SampleAbResources.cs) is the sole temporary AB replacement point. `LoadBytes` calls `FileConfigSource.Read`; `LoadBytesAsync` performs real asynchronous file I/O, without fake async or hardcoded sample data. `ZrConfig/` maps to the current data root; `versions/<version>/<table-file>` remains intact. The Game window retains 14 recent entries; Console also logs requests, completion, failure, and byte counts.
+[SampleAbResources.cs](../unity/ZrConfig.Sample/Assets/Scripts/SampleAbResources.cs) is the sole temporary AB replacement point. `LoadBytes` calls `FileConfigSource.Read`; `LoadBytesAsync` performs real asynchronous file I/O, without fake async or hardcoded sample data. `ZrConfig/` maps to the current data root; `Common/current.json` and the `Tables/bytes` or `Tables/json` relative paths remain intact. The Game window retains 14 recent entries; Console also logs requests, completion, failure, and byte counts.
 
 For production AB, replace reads in these two methods and return `byte[]`; business entry points stay the same. Handle address mapping, download readiness, request coalescing, independent caller cancellation, and resource-handle release according to the framework. The temporary implementation adds no resource cache and allocates an independent managed array per read; snapshots retain loaded bytes/objects. Production bridge bytes must likewise remain valid and immutable throughout snapshot use.
 
@@ -146,7 +146,7 @@ Android/iOS/WebGL Players automatically use `CoalescingConfigSource → Streamin
 
 ### Reload after export
 
-The Editor reads `samples/Output` directly. During Play, save existing Excel files and “Validate and export” in the App; on success, click “Reload” in Game. Alternatively run from the repository root:
+The Editor reads `samples/Output/CSharp` directly. During Play, save existing Excel files and “Validate and export” in the App; on success, click “Reload” in Game. Alternatively run from the repository root:
 
 ```bash
 bash scripts/dotnet.sh run --project src/ZrConfig.Cli -p:NuGetAudit=false -- export --project samples/project.zrconfig.json
@@ -201,6 +201,6 @@ See [row loading and AB adaptation](../docs/project-development.en.md#lazy-row-l
 
 ## Validation-only mode and release history
 
-Open shared `samples/project.zrconfig.json` and run “Validate only” without modifying shared Config/Output. Review generation previews after schema changes. After publication, inspect table/record differences in “Version history”. See [release management and acceptance](../docs/release-and-acceptance.en.md) for CLI, compatible rollback, real Player builds, and reports. All workbooks keep sharing Config, Rules, and Output.
+Open shared `samples/project.zrconfig.json` and run “Validate only” without modifying shared Config/Output. Review generation previews after schema changes. Export updates only changed table files in a fixed directory, without creating data versions. See [release management and acceptance](../docs/release-and-acceptance.en.md) for CLI, compatible rollback, real Player builds, and reports. All workbooks keep sharing Config, Rules, and Output.
 
 Standard Android/iOS/WebGL samples read StreamingAssets asynchronously. See [target-platform acceptance](../docs/release-and-acceptance.en.md#real-player-entry-points) for acceptance builds/device reports. Third-party AB SDKs still require integration for the project's chosen version.

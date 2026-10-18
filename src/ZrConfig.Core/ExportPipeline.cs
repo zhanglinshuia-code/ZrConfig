@@ -21,7 +21,9 @@ public sealed record ExportResult(bool Success, string RunId, string LogFile, st
     {
         get; init;
     }
-    public bool Published => Success && !ValidationOnly && VersionId != null;
+    public bool ReusedVersion { get; init; }
+    public int UpdatedTables { get; init; }
+    public bool Published => Success && !ValidationOnly && !ReusedVersion && VersionId != null;
     public string? InputFingerprint
     {
         get; init;
@@ -60,8 +62,8 @@ public static class ExportPipeline
         RunCore(dataFolder, outputFolder, modelAssembly, rulesFolder, null, debugRules, [], target, dataFormat: dataFormat);
 
     public static ExportResult RunWithSources(string dataFolder, string outputFolder, string generatedFolder,
-        string rulesFolder, bool debugRules = false, ConfigTarget target = ConfigTarget.Client, WorkflowOperation? operation = null, string dataFormat = "binary") =>
-        RunCore(dataFolder, outputFolder, null, rulesFolder, generatedFolder, debugRules, [], target, operation, dataFormat: dataFormat);
+        string rulesFolder, bool debugRules = false, ConfigTarget target = ConfigTarget.Client, WorkflowOperation? operation = null, string dataFormat = "binary", IEnumerable<string>? languages = null) =>
+        RunCore(dataFolder, outputFolder, null, rulesFolder, generatedFolder, debugRules, [], target, operation, dataFormat: dataFormat, languages: languages);
 
     public static ExportResult ValidateWithSources(WorkspaceSettings settings, bool debugRules = false, WorkflowOperation? operation = null)
     {
@@ -90,7 +92,7 @@ public static class ExportPipeline
 
     private static ExportResult RunCore(string dataFolder, string outputFolder, Assembly? modelAssembly,
         string? rulesFolder, string? generatedFolder, bool debugRules, Assembly[] validatorAssemblies,
-        ConfigTarget target, WorkflowOperation? operation = null, bool validationOnly = false, string dataFormat = "binary")
+        ConfigTarget target, WorkflowOperation? operation = null, bool validationOnly = false, string dataFormat = "binary", IEnumerable<string>? languages = null)
     {
         _ = ConfigTargets.Marker(target);
         operation ??= new WorkflowOperation();
@@ -99,7 +101,8 @@ public static class ExportPipeline
             string.IsNullOrWhiteSpace(rulesFolder) ? "" : Path.GetFullPath(rulesFolder))
         {
             Target = target,
-            DataFormat = ExportOptions.Format(dataFormat)
+            DataFormat = ExportOptions.Format(dataFormat),
+            CodeLanguages = ExportOptions.Languages(languages ?? ["csharp"])
         };
         WorkspaceSettings.RequireSeparateDirectories(settings, includeOutput: true);
         string runId = operation.RunId;
@@ -120,6 +123,8 @@ public static class ExportPipeline
         collector.Added += operation.ReportDiagnostic;
         bool success = false;
         bool published = false;
+        bool reusedVersion = false;
+        int updatedTables = 0;
         bool cancelled = false;
         string? versionId = null;
         ProjectInputSnapshot? snapshot = null;
@@ -168,21 +173,24 @@ public static class ExportPipeline
                         {
                             string roundtrip = Path.Combine(outputFolder, "roundtrip");
                             Directory.CreateDirectory(roundtrip);
-                            WriteTables(roundtrip, data.Tables, operation, settings.DataFormat, ExportOptions.NativeSources(settings.CodeFolder).Any());
+                            WriteTables(roundtrip, data.Tables, operation, settings.DataFormat, settings.CodeLanguages.Any(language => language != "csharp") || ExportOptions.NativeSources(settings.CodeFolder).Any());
                             snapshot.RequireCurrent(settings, operation.CancellationToken);
                             success = true;
                         }
                         else
                         {
-                            versionId = Publish(settings, runId, data.Tables, snapshot, operation, collector,
+                            (versionId, reusedVersion, updatedTables) = Publish(settings, runId, data.Tables, snapshot, operation, collector,
                                 candidate =>
                                 {
                                     SaveDiagnostics(diagnosticFile, runId, true, candidate, SortedDiagnostics(collector));
                                     File.Copy(diagnosticFile, Path.Combine(runDirectory, "diagnostics.json"), overwrite: true);
                                 });
                             // No cancellation checkpoints after the atomic activation.
-                            success = published = true;
-                            logger.Information(ConfigText.Get("已发布版本 {VersionId}，共 {TableCount} 张表。", "Published version {VersionId} with {TableCount} tables."), versionId, data.Tables.Count);
+                            success = true;
+                            published = !reusedVersion;
+                            logger.Information(reusedVersion
+                                ? ConfigText.Get("数据未变化，固定目录中的表文件保持不变。共检查 {TableCount} 张表。", "Data unchanged; fixed output files were preserved. Checked {TableCount} tables.")
+                                : ConfigText.Get("已更新固定目录中的 {TableCount} 张表。", "Updated {TableCount} tables in the fixed output directory."), reusedVersion ? data.Tables.Count : updatedTables);
                         }
                     }
                 }
@@ -191,7 +199,7 @@ public static class ExportPipeline
             {
                 cancelled = true;
                 collector.Add(new Diagnostic(DiagnosticSeverity.Info, "OPERATION_CANCELLED",
-                    ConfigText.Get("操作已取消，当前发布版本未切换。", "Operation cancelled; the active version was not switched.")));
+                    ConfigText.Get("操作已取消，原有表文件保持不变。", "Operation cancelled; existing table files were preserved.")));
             }
             catch (Exception ex)
             {
@@ -222,7 +230,7 @@ public static class ExportPipeline
 
             logger.Information(ConfigText.Get("运行结束。成功={Success:l}；错误={Errors}；警告={Warnings}", "Run finished. Success={Success:l}; Errors={Errors}; Warnings={Warnings}"),
                 ConfigText.Boolean(success), diagnostics.Count(d => d.Severity == DiagnosticSeverity.Error), diagnostics.Count(d => d.Severity == DiagnosticSeverity.Warning));
-            if (!published)
+            if (!published && !reusedVersion)
             {
                 SaveDiagnostics(diagnosticFile, runId, success, null, diagnostics);
             }
@@ -241,6 +249,8 @@ public static class ExportPipeline
                 success,
                 cancelled,
                 published,
+                reusedVersion,
+                updatedTables,
                 versionId,
                 target = ConfigTargets.Marker(target),
                 inputFingerprint = snapshot?.Fingerprint,
@@ -267,6 +277,8 @@ public static class ExportPipeline
         {
             Cancelled = cancelled,
             ValidationOnly = validationOnly,
+            ReusedVersion = reusedVersion,
+            UpdatedTables = updatedTables,
             InputFingerprint = snapshot?.Fingerprint,
             Elapsed = operation.Elapsed,
             LogText = logText,
@@ -367,45 +379,116 @@ public static class ExportPipeline
         return json;
     }
 
-    private static string Publish(WorkspaceSettings settings, string runId, IReadOnlyList<LoadedTable> tables,
+    private static (string VersionId, bool ReusedVersion, int UpdatedTables) Publish(WorkspaceSettings settings, string runId, IReadOnlyList<LoadedTable> tables,
         ProjectInputSnapshot snapshot, WorkflowOperation operation, DiagnosticCollector collector, Action<string> beforeActivate)
     {
-        string versions = Path.Combine(settings.OutputFolder, "versions");
-        ReleaseHistory.RejectLinks(versions);
-        Directory.CreateDirectory(versions);
-        string staging = Path.Combine(versions, ".staging-" + runId);
-        string versionId = "v" + runId;
-        string published = Path.Combine(versions, versionId);
-        string manifestPath = Path.Combine(settings.OutputFolder, "current.json");
-        string temporary = Path.Combine(settings.OutputFolder, ".current-" + runId + ".tmp");
+        string staging = Path.Combine(Path.GetTempPath(), "zrconfig-export-" + runId);
         using FileStream lease = ReleaseHistory.AcquirePublishLock(settings.OutputFolder);
         Directory.CreateDirectory(staging);
         try
         {
-            ReleaseTable[] entries = WriteTables(staging, tables, operation, settings.DataFormat, ExportOptions.NativeSources(settings.CodeFolder).Any());
-            var manifest = new ReleaseManifest(ExportOptions.ManifestFormat(settings.DataFormat), ConfigTargets.Marker(settings.Target), versionId, DateTime.UtcNow, entries, ReleaseHistory.CodeFingerprint(snapshot));
-            ReleaseHistory.WriteCandidate(staging, manifest, tables, settings, snapshot, collector.Snapshot(), operation);
+            ReleaseTable[] entries = WriteTables(staging, tables, operation, settings.DataFormat, settings.CodeLanguages.Any(language => language != "csharp") || ExportOptions.NativeSources(settings.CodeFolder).Any());
+            string format = ExportOptions.ManifestFormat(settings.DataFormat), target = ConfigTargets.Marker(settings.Target);
+            string? fingerprint = ReleaseHistory.CodeFingerprint(snapshot);
+            // Identity is content based; every selected language has stable, independently managed paths.
+            string identity = "d" + Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { format, target, fingerprint, entries, layout = "grouped" })));
+            var manifest = new ReleaseManifest(format, target, identity, default, entries, fingerprint) { Layout = "grouped" };
+            var transaction = new GenerationFileTransaction(settings.OutputFolder, operation.ExportFileOperations ?? new ExportFileOperations());
+            var changed = new HashSet<string>(StringComparer.Ordinal);
+            var manifests = new List<string>();
+            foreach (string language in settings.CodeLanguages)
+            {
+                string root = Path.Combine(settings.OutputFolder, ExportOptions.LanguageDirectory(language));
+                string manifestPath = Path.Combine(root, "Common", "current.json");
+                ReleaseManifest? previous = null;
+                try { previous = ReleaseHistory.TryReadCurrent(root); }
+                catch (Exception error) when (error is IOException or JsonException or InvalidDataException)
+                {
+                    System.Diagnostics.Trace.TraceWarning("Previous data manifest unavailable: {0}", error.Message);
+                }
+                var expected = new HashSet<string>(StringComparer.Ordinal);
+                foreach (ReleaseTable table in entries)
+                    foreach (string file in new[] { table.File, table.JsonFile }.OfType<string>())
+                    {
+                        operation.Checkpoint();
+                        string relative = ExportOptions.TablePath(file);
+                        expected.Add(relative);
+                        string path = Path.Combine(root, relative);
+                        ReleaseHistory.RejectLinks(path);
+                        byte[] bytes = File.ReadAllBytes(Path.Combine(staging, file));
+                        if (!File.Exists(path) || !File.ReadAllBytes(path).AsSpan().SequenceEqual(bytes))
+                        {
+                            transaction.SetBytes(path, bytes);
+                            changed.Add(table.Name);
+                        }
+                    }
+                if (previous?.Layout == "grouped")
+                    foreach (ReleaseTable table in previous.Tables)
+                        foreach (string file in new[] { table.File, table.JsonFile }.OfType<string>())
+                        {
+                            string relative = ExportOptions.TablePath(file);
+                            if (expected.Contains(relative)) continue;
+                            string path = Path.Combine(root, relative);
+                            ReleaseHistory.RejectLinks(path);
+                            if (File.Exists(path)) { transaction.SetBytes(path, null); changed.Add(table.Name); }
+                        }
+                bool sameManifest = previous?.Layout == "grouped" && previous.VersionId == identity && previous.Format == format && previous.Target == target &&
+                    previous.CodeFingerprint == fingerprint && previous.Tables.SequenceEqual(entries);
+                if (!sameManifest) manifests.Add(manifestPath);
+            }
+            // Retire the old root manifest; migrate flat files while preserving archived version data.
+            bool migratedLayout = false;
+            string oldManifestPath = Path.Combine(settings.OutputFolder, "current.json");
+            if (File.Exists(oldManifestPath))
+            {
+                ReleaseManifest? old = null;
+                try { old = ReleaseHistory.ReadManifest(oldManifestPath); }
+                catch (Exception error) when (error is IOException or JsonException or InvalidDataException) { System.Diagnostics.Trace.TraceWarning("Legacy manifest unavailable: {0}", error.Message); }
+                if (old != null && old.Layout is null or "" or "flat")
+                {
+                    migratedLayout = true;
+                    if (old.Layout == "flat")
+                        foreach (string file in old.Tables.SelectMany(t => new[] { t.File, t.JsonFile }).OfType<string>().Distinct(StringComparer.Ordinal).Where(file => file != "current.json"))
+                            transaction.SetBytes(Path.Combine(settings.OutputFolder, file), null);
+                    transaction.SetBytes(oldManifestPath, null);
+                }
+            }
+            bool unchanged = manifests.Count == 0 && changed.Count == 0 && !migratedLayout;
+            operation.Report(unchanged ? "unchanged" : "preparing-output", unchanged
+                ? ConfigText.Get("数据未变化，表文件保持不变。", "Data unchanged; table files preserved.")
+                : ConfigText.Get($"准备更新 {changed.Count} 张表。", $"Preparing to update {changed.Count} tables."));
             snapshot.RequireCurrent(settings, operation.CancellationToken);
-            Directory.Move(staging, published);
-            ReleaseHistory.WriteJson(temporary, manifest);
-            beforeActivate(versionId);
+            foreach (string path in manifests) transaction.SetBytes(path, JsonSerializer.SerializeToUtf8Bytes(manifest, ReleaseHistory.JsonOptions));
+            beforeActivate(identity);
             operation.Checkpoint();
-            operation.Report("activating", ConfigText.Get("正在激活完整版本", "Activating the complete version"), committing: true);
-            // Same-directory rename is the commit point on supported local file systems.
-            File.Move(temporary, manifestPath, overwrite: true);
-            return versionId;
+            if (!unchanged)
+            {
+                operation.Report("activating", ConfigText.Get("正在更新有变化的表文件", "Updating changed table files"), committing: true);
+                if (!transaction.Commit(collector)) throw new IOException(ConfigText.Get("导出写入失败，已尝试恢复原文件。", "Export write failed; restoration of original files was attempted."));
+            }
+            return (identity, unchanged, changed.Count);
         }
         finally
         {
-            if (Directory.Exists(staging))
+            try
             {
-                Directory.Delete(staging, recursive: true);
+                if (Directory.Exists(staging)) Directory.Delete(staging, recursive: true);
             }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            {
+                collector.Add(new Diagnostic(DiagnosticSeverity.Warning, "EXPORT_TEMP_CLEANUP_FAILED",
+                    ConfigText.Get("临时文件未清理：", "Temporary files could not be removed: ") + error.Message, staging));
+            }
+        }
+    }
 
-            if (File.Exists(temporary))
-            {
-                File.Delete(temporary);
-            }
+    private sealed class ExportFileOperations : GenerationFileOperations
+    {
+        internal override void Write(string path, byte[] bytes, bool restoring)
+        {
+            string pending = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+            try { File.WriteAllBytes(pending, bytes); File.Move(pending, path, overwrite: true); }
+            finally { if (File.Exists(pending)) File.Delete(pending); }
         }
     }
 }

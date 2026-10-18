@@ -1730,7 +1730,7 @@ This example uses the repository's official samples; chapter 12 is not a prerequ
 
 1. Export all samples/Data following the [sample instructions](../samples/README.en.md): nine tables, including the 10,000-row case. Confirm zero errors.
 2. Integrate Assets/ZrConfig source as described above. Copy CustomTypes, Serialization, and Generated from unity/ZrConfig.Sample/Assets/HotUpdate/Config into Unity's Assets/Config, retaining one source set and one TableCodecs.
-3. Follow samples/Output/current.json to copy every referenced `.bytes` / `.json` table file into its version path under Assets/StreamingAssets/ZrConfig, then copy current.json last. Exclude logs, compilation caches, release records, and `.rows.json`. The repository sample can deploy with `unity-sample`.
+3. Follow samples/Output/CSharp/Common/current.json to copy every referenced `.bytes` / `.json` table file into its Tables/json or Tables/bytes path under Assets/StreamingAssets/ZrConfig, then copy current.json last. Exclude logs, compilation caches, release records, and `.rows.json`. The repository sample can deploy with `unity-sample`.
 4. Wait for Unity compilation, then add the reading script below.
 
 If your project already has configuration, use its own Data/Config/Rules set. Do not mix in tables with the same names from the official samples or chapter 12.
@@ -1828,10 +1828,10 @@ This script demonstrates an application entry point. Only one entry point should
 Bind ReloadConfiguration to a UI Button if needed. This example reads the Unity project's StreamingAssets copy. For each data-only update:
 
 1. Save Excel, export again to samples/Output, and confirm success.
-2. Copy every `.bytes` / `.json` table referenced by the new current.json to `Assets/StreamingAssets/ZrConfig/versions/<version>/`, then replace `Assets/StreamingAssets/ZrConfig/current.json` last. Keep management records and diff snapshots in Output.
+2. Copy every `.bytes` / `.json` table referenced by the new current.json to the matching `Tables/json` or `Tables/bytes` folder under `Assets/StreamingAssets/ZrConfig/`, then replace `Assets/StreamingAssets/ZrConfig/Common/current.json` last. Keep diagnostic logs in Output.
 3. Click ReloadConfiguration to reread the manifest and data. Updating only samples/Output without copying these files still loads the old version.
 
-The repository's Editor sample reads shared samples/Output directly; Players use filtered deployment in StreamingAssets. Schema or type changes also require synchronizing Config source, waiting for Unity compilation, and restarting Play mode. Data reload does not update compiled C# types.
+The repository's Editor sample reads samples/Output/CSharp directly; Players use filtered deployment in StreamingAssets. Schema or type changes also require synchronizing Config source, waiting for Unity compilation, and restarting Play mode. Data reload does not update compiled C# types.
 
 For beginners:
 
@@ -1997,7 +1997,7 @@ HeroConfig hero = await snapshot.GetHeroAsync(1, token);
 SkillConfig skill = hero == null ? null : await hero.GetSkillAsync(token);
 ```
 
-The default root is `Application.streamingAssetsPath + "/ZrConfig"`; the constructor also accepts your actual root. Sources receive relative paths such as `current.json` and `versions/<version>/Hero.bytes`. The adapter validates paths and reads asynchronously through UnityWebRequest, with cancellation and request errors. `ReadCount` and `Trace` expose actual requests; `CoalescingConfigSource` merges concurrent same-path reads.
+The default root is `Application.streamingAssetsPath + "/ZrConfig"`; the constructor also accepts your actual root. Sources receive relative paths such as `Common/current.json` and `Tables/bytes/Hero.bytes`. The adapter validates paths and reads asynchronously through UnityWebRequest, with cancellation and request errors. `ReadCount` and `Trace` expose actual requests; `CoalescingConfigSource` merges concurrent same-path reads.
 
 Construct and call this adapter on Unity's main thread, without background scheduling or blocking on async operations. It implements only `IConfigSource`: use `GetHeroAsync`, `GetSkillAsync`, and other async APIs for first queries and uncached references. Cached data supports synchronous queries. Do not use desktop-style `hero.Skill` to fetch an unopened resource. Reload with `ReloadAsync`; full validation before switching requires full-load entry points with `TableCodecs.Registry`.
 
@@ -2040,7 +2040,7 @@ SkillConfig skill = await hero.GetSkillAsync(token);
 Debug.Log(skill?.Name);
 ```
 
-`source` binds the two read functions; `token` is caller cancellation. Manifest/table paths are relative: `current.json`, `versions/<version>/<manifest table filename>`. Bridges map these to resource addresses and return bytes, not URLs or text. Callback AB APIs can use `ConfigCompletionSource<byte[]>` to complete success, failure, or cancellation separately. Do not disguise sync reads as async, poll AB operations, or block waiting for them.
+`source` binds the two read functions; `token` is caller cancellation. Manifest/table paths are relative: `current.json`, `<manifest table filename>`. Bridges map these to resource addresses and return bytes, not URLs or text. Callback AB APIs can use `ConfigCompletionSource<byte[]>` to complete success, failure, or cancellation separately. Do not disguise sync reads as async, poll AB operations, or block waiting for them.
 
 Delegate adapters only forward reads. Wrap them with `CoalescingConfigSource` (async) or `CoalescingSyncConfigSource` (both APIs) to merge in-flight same-path requests with independent caller cancellation. Entries disappear on completion; manifests and failures are not cached. `SampleAbResources.Source` already wraps the dual-API coalescer. Your integration still owns path mapping, downloads, handle release, and stable byte ownership. Managed bytes must remain valid and immutable throughout snapshot use; releasing framework handles must not reclaim or overwrite them.
 
@@ -2110,7 +2110,7 @@ Odin integration follows the official [PropertyTree](https://odininspector.com/d
 
 ### 14.10 Ordinary .NET integration
 
-Without Unity, use ConfigManager directly and inject a manifest decoder. Place this in an existing async initialization method; configOutputFolder is the actual output root. Ordinary queries need no registry:
+Without Unity, use ConfigManager directly and inject a manifest decoder. Place this in an existing async initialization method; configOutputFolder is the selected language folder, for example Output/CSharp. Ordinary queries need no registry:
 
 ```csharp
 using System.Text.Json;

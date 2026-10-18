@@ -31,7 +31,7 @@ bash scripts/dotnet.sh run --project src/ZrConfig.Cli -p:NuGetAudit=false -- \
 
 Run from root with actual project paths. Windows uses `dotnet run --project src/ZrConfig.Cli -p:NuGetAudit=false --` with arguments on one line. Shared samples already select seven languages, both, C, and server-v1; use samples/project.zrconfig.json without changing side/languages.
 
---accept-changes retains its meaning: after preview review, allow retired-file removal/input-root changes. Export without --generate never changes source; regenerate after language changes. Validate checks selected generated files for staleness without external compilers. Build Java/Go/C++ in business projects/acceptance environments.
+--accept-changes retains its meaning: after preview review, allow retired-file removal/input-root changes. Export without --generate never changes source. App generation/export, CLI `codegen`, `export --generate`, and `validate` check the selected languages together with all languages in the accepted baseline by default. Narrowing the selection preserves existing outputs and does not itself require an API migration. Added languages require generation. Explicitly removing languages requires `codegen --prune-languages --languages <retained-languages>` and an API migration; retain `--prune-languages` for preview, `--verify-api`, and `--accept-api-change`. Ordinary --accept-changes cannot bypass API protection. Pruning is not saved in project settings and is invalid for export or validation. Validate checks generated files for staleness without external compilers. Build Java/Go/C++ in business projects/acceptance environments.
 
 ### Public API protection and explicit migration
 
@@ -181,13 +181,13 @@ Binary remains v4: little-endian integers, length-prefixed UTF-8, fixed schema h
 }
 ```
 
-Versions remain under Output/versions/<version>, followed by atomic current.json replacement. Manifest formats: ZrConfig.Binary/1, ZrConfig.Json/1, ZrConfig.Mixed/1:
+Data is grouped by selected language: `Output/CSharp/Tables/bytes/Hero.bytes`, `Output/CSharp/Tables/json/Hero.json`, and `Output/CSharp/Common/current.json`. Java, Go, Cpp, Lua, TypeScript and Rust have the same structure. The manifest has `layout: "grouped"`; loaders use the language folder as their root. Only selected languages are updated. Legacy flat and version layouts remain readable. Every export validates all tables, then replaces only changed/missing/corrupt files and writes the manifest last. Unchanged files retain their bytes and timestamps. No version directories or data history are created; existing legacy directories remain readable. The deterministic `versionId` is an internal content/cache identity, not a directory. A fixed directory is not an immutable snapshot of on-disk files: finish export before reloading; lazy loaders with old metadata must reload before fetching changed files. Manifest formats: ZrConfig.Binary/1, ZrConfig.Json/1, ZrConfig.Mixed/1:
 
 - binary: .bytes per table; file/sha256 refer to Binary.
 - json: .json per table; file/sha256 refer to JSON.
 - both: both formats in one version; file/sha256 refer to Binary, jsonFile/jsonSha256 to JSON.
 
-Every format verifies names, schema hashes, SHA-256, counts, keys, references. SHA-256 ensures integrity, not signature authentication. Unknown/corrupt/mismatched data never silently falls back to another copy. Rollback verifies both files and deployment compatibility; sample deployment copies both formats.
+Every format verifies names, schema hashes, SHA-256, counts, keys, references. SHA-256 ensures integrity, not signature authentication. Unknown/corrupt/mismatched data never silently falls back to another copy. Sample deployment verifies and copies both formats into a fixed directory.
 
 Six native snapshot loaders compare the complete manifest/generated table set before reading table contents. Extra/missing/equal-count replacement tables fail; duplicate tables fail parsing. Failure preserves Current. Traditional ConfigSnapshot/ConfigManager below retain synchronous full-load semantics; selected/row loading and Clear/Close use later server contracts.
 

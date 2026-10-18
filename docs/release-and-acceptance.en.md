@@ -10,13 +10,13 @@ This page defines release operations, compatibility, verification entry points, 
 | --- | --- | --- | --- |
 | Validate only | No writes or automatic generation | Validation neither reads nor writes selected Output | Session diagnostics; optional report export; temporary compilation/binary read-back in system temp |
 | Generate code | Transactionally update source, schema summary, metadata | No data publication | Preview by table, field, type, key, side; file list available as detail |
-| Validate and export | Confirm generation first when needed | Atomically switch current.json after success | Archive each run entering export; successful candidate versions retain independent manifests |
-| Roll back data | No game-code changes | Switch to a verified complete existing version | Deployment compatibility manifest and reason required; preview by default |
-| Clean history | No source changes | Delete confirmed expired versions | Protect current, pinned, unknown, and still-readable-window versions |
+| Validate and export | Confirm generation when needed | Replace only changed table files in a fixed directory; commit the manifest last | Keep per-run diagnostics; create no data version directories |
+
+
 
 Validation-only reports “generation required; full validation incomplete” for missing code, outdated support, or stale schemas. It cannot ignore new fields using old models and claim success. Blank Rules explicitly means basic checks only. Rules are executable C# and must follow project read-only conventions; arbitrary rules are not OS-sandboxed.
 
-The App's project status bar separately reads the current version name. This display is outside validation-only and never creates/switches versions.
+The App displays the number of tables and the fixed-directory output status. This read-only display is outside validation-only.
 
 Passing validation does not guarantee later disk writes. Export rereads/verifies inputs and rechecks Excel, code, rules, and Tables.json fingerprints before publication, refusing switches on change. File watchers only indicate potentially stale results; correctness does not depend on watcher events.
 
@@ -24,17 +24,17 @@ Code generation and data publication have separate commit points. Cancellation/e
 
 ## Version contents and logs
 
-Each new version contains manifest.json, release.json, schema.json, diagnostics.json, selected `.bytes`/`.json` table data, and `.rows.json` difference snapshots. Runtime needs only root current.json plus every referenced data file; dual-format requires both file and jsonFile targets. **Do not publish row-difference snapshots or diagnostics as game resources.** Unity deployment copies referenced data; see [files, versions, loading](server-generation.en.md#files-versions-and-loading).
+New exports contain one folder per selected language (CSharp, Java, Go, Cpp, Lua, TypeScript, Rust), with `Common/current.json`, `Tables/bytes/*.bytes` and `Tables/json/*.json`. JSON mode writes `CSharp/Tables/json/Hero.json`; changing Hero replaces only its changed file(s). Unchanged files retain their modification times. `current.json` has `layout: "grouped"` and an internal content identity for caches and integrity. No data history, row-difference snapshots, or new version directories are created. Existing legacy directories are preserved. Unity deployment also uses fixed paths.
 
-release.json records tool version, input/configuration fingerprints, preceding version, and table changes. Run records live in Output/Logs/&lt;run-id&gt;; fixed export.log/diagnostics.json describe the latest export. New exports never overwrite older run directories. App reports can preserve schema-check failures, validation-only, and generation results. Old successful disk reports do not describe the current run.
+All inputs and references are checked before writes. Staging occurs in system temp; write failures restore original files. The manifest is committed last. Readers should reload after export completes: on-disk table files are mutable, and an old lazy loader must reload its metadata before fetching changed files. Already loaded snapshots remain usable.
 
-Completed but inactive candidates may remain for investigation; root current.json determines the active version. Rollback writes a preparation record before activation and a receipt afterward; after interruption, reconcile against the current manifest.
+Run records remain in `Output/Logs/<run-id>/`; fixed logs describe the latest run. `updatedTables` counts rewritten tables; no changes sets the compatibility fields `reusedVersion: true` and `published: false`. This is diagnostic history, not copies of configuration data. Generation/validation reports can also be saved from the App.
 
 Save reports as .json outside project Data/Config/Rules/Output to avoid overwriting inputs/releases. Reports exclude complete workbooks/source and replace known roots with placeholders. Business messages may still contain data/other paths; inspect before sharing.
 
 ## Compare, roll back, and clean
 
-App “Version history” supports table comparisons, per-field differences, pinning, rollback, and cleanup. Select a version/baseline and click “Compare with baseline”; enter table/offset and “Field comparison”. Rows match by complete keys, showing additions/deletions/edits with pagination. Schema differences stop field comparison to avoid misreporting incompatible layouts as data edits. Missing historical manifests/row snapshots disable corresponding operations while preserving original data.
+The following CLI commands exist only to inspect and maintain legacy version directories created by older releases. The App no longer shows a version-history button. Normal exports do not create history and do not use these commands. Restoring an old directory does not change the fixed-directory behavior of the next export.
 
 Replace version identifiers and manifest paths below with actual values:
 
@@ -46,7 +46,7 @@ bash scripts/dotnet.sh run --project src/ZrConfig.Cli -- release rollback --proj
 bash scripts/dotnet.sh run --project src/ZrConfig.Cli -- release cleanup --project samples/project.zrconfig.json --keep 10 --days 30
 ```
 
-Commands return JSON. rows offset is zero-based; limit is 1–1000, default 100 differences. Rollback/cleanup preview by default; review and repeat with --apply. Every CLI call recomputes its plan and rechecks state on execution. App confirmation uses the previewed plan; stale plans require a new preview.
+Commands return JSON. rows offset is zero-based; limit is 1–1000, default 100 differences. Rollback/cleanup preview by default; review and repeat with --apply. Every CLI call recomputes its plan and rechecks state on execution. Stale plans require a new preview.
 
 Pin or unpin a version:
 

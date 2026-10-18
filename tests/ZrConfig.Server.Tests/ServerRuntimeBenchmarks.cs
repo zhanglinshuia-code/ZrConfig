@@ -93,7 +93,7 @@ internal static class ServerRuntimeBenchmarks
                 builds.Add(new{language="generator-repeat",milliseconds=watch.Elapsed.TotalMilliseconds,unchanged_files=after.Count});
                 Console.WriteLine($"Scale repeat generation unchanged: {after.Count} files.");
             }
-            if(controlScenarios)ServerRuntimeControlBenchmarks.WriteGraphs(output,builds);
+            if(controlScenarios)ServerRuntimeControlBenchmarks.WriteGraphs(ExportOptions.Languages(settings.CodeLanguages).Select(language=>Path.Combine(output,ExportOptions.LanguageDirectory(language))).ToArray(),builds);
             var drivers=await Compile(root,code,builds,sampleRepository!=null,schedulingScenarios,queryScenarios,profilingRepository,controlScenarios,lockRepository);
             foreach(Driver driver in drivers)
             foreach(string format in new[]{"binary","json"})
@@ -101,7 +101,8 @@ internal static class ServerRuntimeBenchmarks
             foreach(int retained in retainedScenarios?new[]{0,1,4}:new[]{0})
             for(int repeat=0;repeat<repeats;repeat++)
             {
-                var result=await Execute(driver.Executable,[..driver.Arguments,output,format,profile.Item1,profile.Item2.ToString(CultureInfo.InvariantCulture),rows.ToString(CultureInfo.InvariantCulture),retained.ToString(CultureInfo.InvariantCulture)],driver.Directory);
+                string languageOutput=Path.Combine(output,ExportOptions.LanguageDirectory(driver.Language));
+                var result=await Execute(driver.Executable,[..driver.Arguments,languageOutput,format,profile.Item1,profile.Item2.ToString(CultureInfo.InvariantCulture),rows.ToString(CultureInfo.InvariantCulture),retained.ToString(CultureInfo.InvariantCulture)],driver.Directory);
                 string line=result.Output.Split('\n').Last(s=>s.StartsWith('{'));var value=JsonNode.Parse(line)!.AsObject();
                 var setup=result.Output.Split('\n').Where(s=>s.StartsWith('{')).Select(s=>JsonNode.Parse(s)!).SingleOrDefault(s=>s["benchmark_setup"]!=null);
                 if(setup!=null)value["setup"]=setup;

@@ -331,7 +331,7 @@ namespace ZrConfig.Runtime.Server
             try
             {
                 long manifestLimit = ReadAllowance(options, Math.Min(options.MaxManifestBytes, options.MaxBundleBytes), 0, 0);
-                byte[] bytes = Own(Read(source, "current.json", manifestLimit, cancellationToken), manifestLimit, "current.json");
+                byte[] bytes = Own(ReadManifest(source, manifestLimit, cancellationToken), manifestLimit, "Common/current.json");
                 ConfigManifest manifest = Manifest(bytes,options.Limits);
                 List<ConfigManifestTable> entries = Entries(manifest, options);
                 var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
@@ -339,9 +339,9 @@ namespace ZrConfig.Runtime.Server
                 foreach (ConfigManifestTable entry in entries)
                 {
                     Check(cancellationToken, deadline);
-                    string path = "versions/" + manifest.versionId + "/" + entry.file;
+                    string path = entry.relativePath;
                     long limit = ReadAllowance(options, Math.Min(options.MaxTableBytes, options.MaxBundleBytes - total), total, IndexEstimate(entries));
-                    byte[] data = Own(Read(source, path, limit, cancellationToken), limit, path);
+                    byte[] data = Own(Read(source, path, limit, cancellationToken, manifest.versionId), limit, path);
                     total = checked(total + data.Length); files.Add(path, data);
                 }
                 var prepared = Finish(manifest, entries, files, bytes, options, generation, operation, deadline, cancellationToken);
@@ -362,7 +362,7 @@ namespace ZrConfig.Runtime.Server
             try
             {
                 long manifestLimit = ReadAllowance(options, Math.Min(options.MaxManifestBytes, options.MaxBundleBytes), 0, 0);
-                byte[] bytes = Own(await ReadAsync(source, "current.json", manifestLimit, cancellationToken), manifestLimit, "current.json");
+                byte[] bytes = Own(await ReadManifestAsync(source, manifestLimit, cancellationToken), manifestLimit, "Common/current.json");
                 ConfigManifest manifest = Manifest(bytes,options.Limits);
                 List<ConfigManifestTable> entries = Entries(manifest, options);
                 var files = new Dictionary<string, byte[]>(StringComparer.Ordinal);
@@ -370,9 +370,9 @@ namespace ZrConfig.Runtime.Server
                 foreach (ConfigManifestTable entry in entries)
                 {
                     Check(cancellationToken, deadline);
-                    string path = "versions/" + manifest.versionId + "/" + entry.file;
+                    string path = entry.relativePath;
                     long limit = ReadAllowance(options, Math.Min(options.MaxTableBytes, options.MaxBundleBytes - total), total, IndexEstimate(entries));
-                    byte[] data = Own(await ReadAsync(source, path, limit, cancellationToken), limit, path);
+                    byte[] data = Own(await ReadAsync(source, path, limit, cancellationToken, manifest.versionId), limit, path);
                     total = checked(total + data.Length); files.Add(path, data);
                 }
                 var prepared = Finish(manifest, entries, files, bytes, options, generation, operation, deadline, cancellationToken);
@@ -631,20 +631,30 @@ namespace ZrConfig.Runtime.Server
             // Reserve room for input ownership, parsing and conversion before asking the source.
             return Math.Min(fileLimit, (remaining - indexes) / 4 - accumulated);
         }
-        private static byte[] Read(ISyncConfigSource source, string path, long limit, CancellationToken token)
+        private static byte[] ReadManifest(ISyncConfigSource source, long limit, CancellationToken token)
+        {
+            try { return Read(source, "Common/current.json", limit, token); }
+            catch (Exception error) when (ConfigManager.MissingManifest(error) || error.InnerException != null && ConfigManager.MissingManifest(error.InnerException)) { token.ThrowIfCancellationRequested(); return Read(source, "current.json", limit, token); }
+        }
+        private static async ConfigOperation<byte[]> ReadManifestAsync(IConfigSource source, long limit, CancellationToken token)
+        {
+            try { return await ReadAsync(source, "Common/current.json", limit, token); }
+            catch (Exception error) when (ConfigManager.MissingManifest(error) || error.InnerException != null && ConfigManager.MissingManifest(error.InnerException)) { token.ThrowIfCancellationRequested(); return await ReadAsync(source, "current.json", limit, token); }
+        }
+        private static byte[] Read(ISyncConfigSource source, string path, long limit, CancellationToken token, string version = "")
         {
             try { return source is IBoundedConfigSource bounded ? bounded.ReadBounded(path, limit, token) : source.Read(path, token); }
-            catch(Exception error){Exception failure=ReadFailure(error,path);if(ReferenceEquals(failure,error))throw;throw failure;}
+            catch(Exception error){Exception failure=ReadFailure(error,path,version);if(ReferenceEquals(failure,error))throw;throw failure;}
         }
-        private static async ConfigOperation<byte[]> ReadAsync(IConfigSource source, string path, long limit, CancellationToken token)
+        private static async ConfigOperation<byte[]> ReadAsync(IConfigSource source, string path, long limit, CancellationToken token, string version = "")
         {
             try { return await (source is IBoundedAsyncConfigSource bounded ? bounded.ReadBoundedAsync(path, limit, token) : source.ReadAsync(path, token)); }
-            catch(Exception error){Exception failure=ReadFailure(error,path);if(ReferenceEquals(failure,error))throw;throw failure;}
+            catch(Exception error){Exception failure=ReadFailure(error,path,version);if(ReferenceEquals(failure,error))throw;throw failure;}
         }
-        private static Exception ReadFailure(Exception error,string path)
+        private static Exception ReadFailure(Exception error,string path,string version)
         {
             string[] parts=path.Split('/');
-            return ConfigException.Normalize(error,"read",version:parts.Length==3?parts[1]:"",table:parts.Length==3?Path.GetFileNameWithoutExtension(parts[2]):"",path:path);
+            return ConfigException.Normalize(error,"read",version:version.Length>0?version:parts.Length==3&&parts[0]=="versions"?parts[1]:"",table:Path.GetFileName(path)=="current.json"?"":Path.GetFileNameWithoutExtension(path),path:path);
         }
         private static byte[] Own(byte[] data, long limit, string path)
         {

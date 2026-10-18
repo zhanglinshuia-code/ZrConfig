@@ -374,11 +374,22 @@ local function read_file(path)
     local f=io.open(path,'rb');if not f then R.invalid('无法读取文件：'..path) end
     local bytes=f:read('a');f:close();if not bytes then R.invalid('读取失败') end;return bytes
 end
+local function data_prefix(manifest,version)
+    local layout=manifest.layout
+    if layout~=nil and layout~=R.NULL and layout~='' and layout~='flat' and layout~='grouped' then R.invalid('Unsupported data layout')end
+    return layout=='grouped' and 'Tables/' or layout=='flat' and '' or 'versions/'..version..'/'
+end
+local function table_path(prefix,file)return prefix..(prefix=='Tables/' and(file:sub(-5)=='.json'and'json/'or'bytes/')or'')..file end
+local function file_manifest(root)
+    local handle,reason,code=io.open(root..'/Common/current.json','rb')
+    if not handle then if code~=2 then R.invalid(reason)end;return read_file(root..'/current.json')end
+    local bytes=handle:read('a');handle:close();if not bytes then R.invalid('读取失败')end;return bytes
+end
 function R.bundle(root)
     if string.packsize('j')~=8 or math.maxinteger~=9223372036854775807 or string.packsize('n')~=8 then R.invalid('需要 64 位整数及双精度 Lua') end
-    local manifest=object(R.parse(read_file(root..'/current.json')))
+    local manifest=object(R.parse(file_manifest(root)))
     if not contains({'ZrConfig.Binary/1','ZrConfig.Json/1','ZrConfig.Mixed/1'},manifest.format) then R.invalid('清单格式无效') end
-    local version=segment(manifest.versionId);local entries={}
+    local version=segment(manifest.versionId);local prefix=data_prefix(manifest,version);local entries={}
     for _,entry in ipairs(array(manifest.tables)) do
         local name=segment(entry.name);if entries[name] then R.invalid('表重复') end
         if entry.file~=name..(manifest.format=='ZrConfig.Json/1' and '.json' or '.bytes') then R.invalid('表文件名无效') end
@@ -403,15 +414,15 @@ function R.bundle(root)
         for _,t in ipairs(s.types)do wire.types[t.id]=t end
         local entry=entries[s.name];if not entry or entry.schemaHash~=s.hash then R.server_error('SchemaMismatch')end
         local alternate=manifest.format=='ZrConfig.Mixed/1'and prefer_json
-        local bytes=read_file(root..'/versions/'..version..'/'..(alternate and entry.jsonFile or entry.file))
+        local bytes=read_file(root..'/'..table_path(prefix,(alternate and entry.jsonFile or entry.file)))
         if R.sha256(bytes)~=hash(alternate and entry.jsonSha256 or entry.sha256)then R.server_error('IntegrityMismatch')end
-        local rows=indexed_rows(wire,bytes,manifest.format=='ZrConfig.Json/1'or alternate);rows.version=manifest.versionId;rows.relative_path='versions/'..manifest.versionId..'/'..(alternate and entry.jsonFile or entry.file);if rows.count~=entry.rows then R.server_error('InvalidValue')end;return rows
+        local rows=indexed_rows(wire,bytes,manifest.format=='ZrConfig.Json/1'or alternate);rows.version=manifest.versionId;rows.relative_path=table_path(prefix,(alternate and entry.jsonFile or entry.file));if rows.count~=entry.rows then R.server_error('InvalidValue')end;return rows
     end,load=function(schema,prefer_json)
         local s=R.parse(schema);local wire=setmetatable({schema=s,types={},tags={},remaining=8000000},Wire)
         for _,t in ipairs(s.types) do wire.types[t.id]=t end
         local entry=entries[s.name];if not entry or entry.schemaHash~=s.hash then R.invalid('表结构不匹配') end
         local alternate=manifest.format=='ZrConfig.Mixed/1' and prefer_json
-        local bytes=read_file(root..'/versions/'..version..'/'..(alternate and entry.jsonFile or entry.file))
+        local bytes=read_file(root..'/'..table_path(prefix,(alternate and entry.jsonFile or entry.file)))
         if R.sha256(bytes)~=hash(alternate and entry.jsonSha256 or entry.sha256) then R.invalid('文件完整性校验失败') end
         local rows=wire:read(bytes,manifest.format=='ZrConfig.Json/1' or alternate);if #rows~=entry.rows then R.invalid('行数不匹配') end;return rows
     end}
@@ -487,7 +498,7 @@ function R.source_bundle(source,plan,cancellation)
         if type(value)=='table'and value.code then local version,file=name:match('^versions/([^/]+)/([^/]+)$');error(R.config_error(value.code,value,{stage='read',version_id=version or'',table=file and file:gsub('%.[^.]+$','')or'',relative_path=name}),0)end
         error(value,0)
     end
-    local bytes=read('current.json',math.min(limits.max_manifest_bytes,limits.max_bundle_bytes))
+    local ok,bytes=pcall(read,'Common/current.json',math.min(limits.max_manifest_bytes,limits.max_bundle_bytes));if not ok then if type(bytes)~='table'or bytes.code~='SourceUnavailable'then error(bytes,0)end;bytes=read('current.json',math.min(limits.max_manifest_bytes,limits.max_bundle_bytes))end
     local manifest=parser_scope(function()return object(parse_json(bytes,{rows=limits.max_tables,elements=64,members=32,string_bytes=4096,depth=8,root_array='tables'}))end,'InvalidManifest')
     if type(manifest.format)~='string'or manifest.format==''then R.server_error('InvalidManifest')end
     if not contains({'ZrConfig.Binary/1','ZrConfig.Json/1','ZrConfig.Mixed/1'},manifest.format)then R.server_error('UnsupportedFormat')end
@@ -501,15 +512,16 @@ function R.source_bundle(source,plan,cancellation)
             entries[name]=entry
         end;return entries,version
     end,'InvalidManifest')
+    local prefix=parser_scope(function()return data_prefix(manifest,version)end,'InvalidManifest')
     local result={version=version,manifest_digest=R.sha256(bytes),budget=budget}
     function result.validate_catalog(catalog)if catalog.target and catalog.target~=""and catalog.target~=manifest.target then R.server_error('CatalogMismatch')end;if count(entries)~=#catalog.tables then R.server_error('TableSetMismatch')end;for _,table in ipairs(catalog.tables)do if not entries[table.name]then R.server_error('TableSetMismatch')end;if entries[table.name].schemaHash~=table.schemaHash then R.server_error('SchemaMismatch')end end end
     function result.open_rows(schema,prefer_json)
         local s=R.parse(schema);local wire=setmetatable({schema=s,types={},tags={},remaining=limits.max_container_elements,limits=limits},Wire);for _,t in ipairs(s.types)do wire.types[t.id]=t end
         local entry=entries[s.name];if not entry or entry.schemaHash~=s.hash then R.server_error('SchemaMismatch')end;budget.rows(entry.rows)
-        local alternate=manifest.format=='ZrConfig.Mixed/1'and prefer_json;local bytes=read('versions/'..version..'/'..(alternate and entry.jsonFile or entry.file),budget.read_limit())
+        local alternate=manifest.format=='ZrConfig.Mixed/1'and prefer_json;local bytes=read(table_path(prefix,(alternate and entry.jsonFile or entry.file)),budget.read_limit())
         if R.sha256(bytes)~=hash(alternate and entry.jsonSha256 or entry.sha256)then R.server_error('IntegrityMismatch')end
         local rows=parser_scope(function()return indexed_rows(wire,bytes,manifest.format=='ZrConfig.Json/1'or alternate,budget)end)
-        rows.version=version;rows.relative_path='versions/'..version..'/'..(alternate and entry.jsonFile or entry.file);if rows.count~=entry.rows then R.server_error('InvalidValue')end;return rows
+        rows.version=version;rows.relative_path=table_path(prefix,(alternate and entry.jsonFile or entry.file));if rows.count~=entry.rows then R.server_error('InvalidValue')end;return rows
     end
     return result
 end

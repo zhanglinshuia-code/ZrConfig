@@ -13,7 +13,7 @@ using ZrConfig.Validation;
 // 验收实际生成的源码和正式数据，不使用手工替代的客户端模型。
 internal static class PortableExportTests
 {
-    internal static async Task RunAsync(string parent, bool requireNative = false)
+    internal static async Task RunAsync(string parent, bool requireNative = false, bool singleLanguagesOnly = false, bool consumersOnly = false)
     {
         CheckToolResolution(parent);
         if (requireNative)
@@ -21,6 +21,7 @@ internal static class PortableExportTests
             ResolveNativeTools(true);
             AdditionalLanguageTests.ResolveTools(true);
         }
+        if (!consumersOnly) await CheckStableExports(parent);
         string root = Path.Combine(parent, "portable");
         string data = Path.Combine(root, "Data"), code = Path.Combine(root, "Config"), output = Path.Combine(root, "Output");
         Directory.CreateDirectory(data); Directory.CreateDirectory(code);
@@ -39,6 +40,20 @@ internal static class PortableExportTests
         var generated = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(true));
         Check(generated.Success, Describe(generated));
         Check(!ModelGenerator.Prepare(data, code, new DiagnosticCollector(), target: settings.Target, languages: settings.CodeLanguages, dataFormat: settings.DataFormat)!.HasChanges, "同一输入反复生成有差异。");
+        if (!consumersOnly)
+        {
+        await CheckSingleLanguageExports(root, settings);
+        string clientRoot = Path.Combine(root, "client"), clientCode = Path.Combine(clientRoot, "Config");
+        Directory.CreateDirectory(clientCode);
+        foreach (string file in new[] { "Types.cs", "Tables.json" })
+            File.Copy(Path.Combine(code, file), Path.Combine(clientCode, file));
+        var clientSettings = settings with { Target = ConfigTarget.Client, CodeFolder = clientCode, OutputFolder = Path.Combine(clientRoot, "Output") };
+        var clientGenerated = await ProjectWorkflow.ExportAsync(clientSettings, _ => Task.FromResult(true));
+        Check(clientGenerated.Success, "客户端单语言测试初始化失败：" + Describe(clientGenerated));
+        await CheckSingleLanguageExports(clientRoot, clientSettings);
+        }
+        if (singleLanguagesOnly) return;
+        output = ExportTestPaths.FlatFixture(output, Path.Combine(root, "legacy-flat"));
         foreach (string file in new[] { "EntryConfig.g.cs", "Java/EntryConfig.java", "Go/entry.g.go", "Cpp/EntryConfig.hpp", "Lua/EntryConfig.lua", "TypeScript/EntryConfig.ts", "Rust/EntryConfig.rs" })
         {
             string source = File.ReadAllText(Path.Combine(code, "Generated", file));
@@ -59,11 +74,22 @@ internal static class PortableExportTests
         ITableCodecRegistry registry = (ITableCodecRegistry)loaded.Assembly.GetType("ZrConfig.Models.TableCodecs")!.GetProperty("Registry")!.GetValue(null)!;
         ConfigManifest Decode(string text) => JsonSerializer.Deserialize<ConfigManifest>(text, new JsonSerializerOptions { IncludeFields = true })!;
         var serverCatalog = (ZrConfig.Runtime.Server.Catalog)loaded.Assembly.GetType("ZrConfig.Models.ServerCatalog")!.GetProperty("Instance")!.GetValue(null)!;
+        foreach (string language in settings.CodeLanguages)
+        {
+            string languageRoot = Path.Combine(settings.OutputFolder, ExportOptions.LanguageDirectory(language));
+            foreach (bool json in new[] { false, true })
+            {
+                using var grouped = new ConfigManager(registry, Decode, new ConfigLoadOptions(preferJson: json));
+                Check(grouped.ReloadAll(new FileConfigSource(languageRoot)).Tables.Count == 3, "Grouped C# load failed.");
+                using var groupedServer = new ZrConfig.Runtime.Server.Manager(serverCatalog, Decode);
+                groupedServer.Reload(new FileConfigSource(languageRoot), new ZrConfig.Runtime.Server.PreparationOptions(preferJson: json));
+            }
+        }
         await ServerRuntimeTests.CheckCSharp(registry, serverCatalog, Decode, output);
         loaded.Assembly.GetType("ServerConsumer")!.GetMethod("Run")!.Invoke(null, [output]);
         File.Delete(Path.Combine(code, "ServerConsumer.cs"));
         using var manager = new ConfigManager(registry, Decode, new ConfigLoadOptions(retainPreviousSnapshots: true, preferJson: true));
-        ConfigSnapshot old = manager.ReloadAll(new FileConfigSource(output));
+        ConfigSnapshot old = manager.ReloadAll(new FileConfigSource(ExportTestPaths.Root(output)));
         IConfigTable table = old.Tables.Single(t => t.Name == "Entry");
         var method = table.GetType().GetMethod("Get", [typeof(string), typeof(int)])!;
         var a = Expression.Parameter(typeof(string)); var b = Expression.Parameter(typeof(int));
@@ -81,9 +107,9 @@ internal static class PortableExportTests
         long start=GC.GetAllocatedBytesForCurrentThread();for(int i=0;i<100000;i++) Check(ReferenceEquals(row,get("east",1)), "查询对象未缓存。");
         long allocated=GC.GetAllocatedBytesForCurrentThread()-start;Check(allocated==0,"C# 热查询发生分配："+allocated);
         Console.WriteLine("通过：C# JSON 强类型读取与 100000 次组合键查询，分配 0 B。");
-        var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(output,"current.json")))!;
+        var manifest = JsonNode.Parse(File.ReadAllText(ExportTestPaths.FilePath(output, "current.json")))!;
         string version = manifest["versionId"]!.GetValue<string>();
-        string jsonFile=Path.Combine(output,"versions",version,"Entry.json");
+        string jsonFile=ExportTestPaths.FilePath(output, "Entry.json");
         byte[] goodJson=File.ReadAllBytes(jsonFile);
         var codec=(IConfigJsonCodec)Activator.CreateInstance(loaded.Assembly.GetTypes().Single(t => typeof(ITableCodec).IsAssignableFrom(t)&&t.Name=="EntryConfigCodec"))!;
         void Bad(Action<JsonNode> corrupt) { var json=JsonNode.Parse(goodJson)!;corrupt(json);Reject(()=>codec.JsonToBinary(System.Text.Encoding.UTF8.GetBytes(json.ToJsonString()))); }
@@ -93,18 +119,15 @@ internal static class PortableExportTests
         Bad(n=>n["rows"]![0]!["Action"]!["$type"]="Unknown");
         Bad(n=>n["rows"]![0]!["Shape"]!["dimensions"]![0]=3);
         Reject(()=>ConfigJson.Parse("{\"x\":1,\"x\":2}")); Reject(()=>ConfigJson.Parse("\"\\uD800\""));
-        File.WriteAllText(jsonFile,"broken"); Reject(()=>manager.ReloadAll(new FileConfigSource(output)));
+        File.WriteAllText(jsonFile,"broken"); Reject(()=>manager.ReloadAll(new FileConfigSource(ExportTestPaths.Root(output))));
         Check(ReferenceEquals(old,manager.Current),"损坏重载替换了旧快照。"); File.WriteAllBytes(jsonFile,goodJson);
-        ConfigSnapshot next=manager.ReloadAll(new FileConfigSource(output)); Check(!ReferenceEquals(next,old)&&old.Tables.Count==3&&ReferenceEquals(row,get("east",1)),"旧快照不能继续查询。");
+        ConfigSnapshot next=manager.ReloadAll(new FileConfigSource(ExportTestPaths.Root(output))); Check(!ReferenceEquals(next,old)&&old.Tables.Count==3&&ReferenceEquals(row,get("east",1)),"旧快照不能继续查询。");
         manager.Dispose();Check(old.Tables.Count==3,"退休快照受管理器释放影响。");
         foreach(string format in new[]{"json","binary"})
         {
             var exported=ExportPipeline.RunWithSources(data,Path.Combine(root,format),code,"",target:ConfigTarget.Server,dataFormat:format);Check(exported.Success,string.Join("\n",exported.Diagnostics));
-            using var verify=new ConfigManager(registry,Decode);Check(verify.ReloadAll(new FileConfigSource(Path.Combine(root,format))).Tables.Count==3,"单格式加载失败。");
+            using var verify=new ConfigManager(registry,Decode);Check(verify.ReloadAll(new FileConfigSource(ExportTestPaths.Root(Path.Combine(root,format)))).Tables.Count==3,"单格式加载失败。");
         }
-        // 重载失败也必须校验双格式版本中未选作主文件的 JSON。
-        var rollback=ReleaseHistory.PrepareRollback(output,version,Path.Combine(output,"current.json"),ConfigTarget.Server);
-        File.WriteAllText(jsonFile,"broken");Reject(()=>ReleaseHistory.Activate(rollback,"损坏文件测试"));File.WriteAllBytes(jsonFile,goodJson);
         string native = Path.Combine(code,"Generated");
         string mappedNative = CheckSourceMappings(root,data,code,output);
         await NativeAsync(mappedNative,output,root,requireNative);
@@ -132,14 +155,14 @@ internal static class PortableExportTests
         Check(ModelGenerator.Generate(data,code,new DiagnosticCollector(),target:ConfigTarget.Server),"旧 C# 二进制转换器兼容失败。");
         string legacy = Path.Combine(root,"legacy");
         Check(ExportPipeline.RunWithSources(data,legacy,code,"",target:ConfigTarget.Server).Success,"旧自定义转换器不能再导出二进制。");
-        byte[] before=File.ReadAllBytes(Path.Combine(legacy,"current.json"));
+        byte[] before=File.ReadAllBytes(ExportTestPaths.FilePath(legacy, "current.json"));
         string converterSource=File.ReadAllText(Path.Combine(code,"Types.cs")).Replace("public struct Money", "[ZrConfig.Runtime.ConfigWireLayout(nameof(Cents))] public struct Money");
         File.WriteAllText(Path.Combine(code,"Types.cs"),converterSource);
         var converterDiagnostics = new DiagnosticCollector();
         var convertedPlan = ModelGenerator.Prepare(data,code,converterDiagnostics,target:ConfigTarget.Server,languages:["all"])!;
         if (convertedPlan.HasApiChanges) Check(GeneratedApiContractTests.AcceptTestMigration(convertedPlan, convertedPlan.ApiChangeId!), "Converter migration approval failed.");
         Check(convertedPlan.Apply(converterDiagnostics, true),string.Join("\n",converterDiagnostics.Snapshot()));
-        Check(!ExportPipeline.RunWithSources(data,legacy,code,"",target:ConfigTarget.Server).Success && before.SequenceEqual(File.ReadAllBytes(Path.Combine(legacy,"current.json"))),"纯二进制原生发布未拒绝错误转换器布局或覆盖了旧版本。");
+        Check(!ExportPipeline.RunWithSources(data,legacy,code,"",target:ConfigTarget.Server).Success && before.SequenceEqual(File.ReadAllBytes(ExportTestPaths.FilePath(legacy, "current.json"))),"纯二进制原生发布未拒绝错误转换器布局或覆盖了旧版本。");
         Console.WriteLine("通过：多语言生成、两种数据格式、精度/损坏检查、原子重载、旧快照及生成事务。");
 
         void Write(string name,string[] names,string[] ts,string[][] rows,bool targets)
@@ -156,6 +179,288 @@ internal static class PortableExportTests
             book.SaveAs(Path.Combine(data,name+".xlsx"));
         }
     }
+    internal static async Task CheckStableExports(string parent)
+    {
+        string root = Path.Combine(parent, "stable-export"), data = Path.Combine(root, "Data"), code = Path.Combine(root, "Config"), rules = Path.Combine(root, "Rules"), output = Path.Combine(root, "Output");
+        Directory.CreateDirectory(data);
+        Directory.CreateDirectory(rules);
+        string bookPath = Path.Combine(data, "Stable.xlsx"), rulePath = Path.Combine(rules, "StableRules.cs");
+        const string goodRule = "using ZrConfig.Models; using ZrConfig.Validation; public sealed class StableRules : TableRules<StableConfig> { }";
+        File.WriteAllText(rulePath, goodRule);
+        using (var book = new XLWorkbook())
+        {
+            var sheet = book.AddWorksheet("Stable");
+            sheet.Cell(1, 1).Value = "Id"; sheet.Cell(2, 1).Value = "int"; sheet.Cell(3, 1).Value = "主键"; sheet.Cell(5, 1).Value = "CS";
+            sheet.Cell(1, 2).Value = "Name"; sheet.Cell(2, 2).Value = "string"; sheet.Cell(5, 2).Value = "CS";
+            sheet.Cell(6, 1).Value = 1; sheet.Cell(6, 2).Value = "original";
+            var untouched = book.AddWorksheet("Untouched");
+            untouched.Cell(1, 1).Value = "Id"; untouched.Cell(2, 1).Value = "int"; untouched.Cell(3, 1).Value = "主键"; untouched.Cell(5, 1).Value = "CS"; untouched.Cell(6, 1).Value = 99;
+            book.SaveAs(bookPath);
+        }
+        void Edit(Action<IXLWorksheet> action)
+        {
+            using var book = new XLWorkbook(bookPath);
+            action(book.Worksheet(1)); book.Save();
+        }
+        var settings = new WorkspaceSettings(data, output, code, rules);
+        Check((await ProjectWorkflow.GenerateAsync(settings, _ => Task.FromResult(false))).Success, "稳定导出测试生成失败。");
+        string current = Path.Combine(output, "CSharp", "Common", "current.json"), versions = Path.Combine(output, "versions");
+        async Task<ExportResult> Export(WorkflowOperation? operation = null)
+        {
+            var result = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false), operation: operation);
+            Check(result.Success && result.Export != null, "稳定导出失败：" + Describe(result));
+            return result.Export!;
+        }
+        Dictionary<string, (byte[] Bytes, DateTime Written)> Saved() => Directory.GetFiles(Path.Combine(output, "CSharp"), "*", SearchOption.AllDirectories).Where(p => Path.GetExtension(p) is ".bytes" or ".json").ToDictionary(p => p, p => (File.ReadAllBytes(p), File.GetLastWriteTimeUtc(p)));
+        void Unchanged(Dictionary<string, (byte[] Bytes, DateTime Written)> saved)
+        {
+            Check(Saved().Count == saved.Count && saved.All(p => File.Exists(p.Key) && File.ReadAllBytes(p.Key).SequenceEqual(p.Value.Bytes) && File.GetLastWriteTimeUtc(p.Key) == p.Value.Written),
+                "相同内容导出改写了当前清单、版本文件或时间戳。");
+            Check(!Directory.Exists(versions), "固定目录导出仍创建版本目录。");
+        }
+        async Task Repeat(string version)
+        {
+            var saved = Saved();
+            var repeated = await Export();
+            Check(repeated.ReusedVersion && !repeated.Published && repeated.VersionId == version, "相同内容仍创建了新版本。");
+            Unchanged(saved);
+            using var run = JsonDocument.Parse(File.ReadAllText(Path.Combine(repeated.RunDirectory!, "run.json")));
+            Check(run.RootElement.GetProperty("reusedVersion").GetBoolean() && !run.RootElement.GetProperty("published").GetBoolean() && run.RootElement.GetProperty("versionId").GetString() == version,
+                "复用版本的运行记录不准确。");
+            using var diagnostic = JsonDocument.Parse(File.ReadAllText(repeated.DiagnosticFile));
+            Check(diagnostic.RootElement.GetProperty("versionId").GetString() == version, "复用版本丢失诊断清单版本。");
+        }
+        foreach (string format in new[] { "binary", "json", "both" })
+        {
+            settings = settings with { DataFormat = format };
+            var first = await Export();
+            Check(first.Published && !first.ReusedVersion, "首次导出/格式切换没有发布新版本。");
+            await Repeat(first.VersionId!);
+            await Repeat(first.VersionId!);
+            Edit(sheet => sheet.Column(2).Width += 1);
+            await Repeat(first.VersionId!);
+            var originalFiles = Saved();
+            string originalName;
+            using (var book = new XLWorkbook(bookPath)) originalName = book.Worksheet(1).Cell(6, 2).GetString();
+            Edit(sheet => sheet.Cell(6, 2).Value = format + "-changed");
+            var unchangedFiles = Saved().Where(p => Path.GetFileName(p.Key).StartsWith("Untouched.", StringComparison.Ordinal)).ToDictionary();
+            var changed = await Export();
+            Check(changed.UpdatedTables == 1 && unchangedFiles.All(p => File.ReadAllBytes(p.Key).SequenceEqual(p.Value.Bytes) && File.GetLastWriteTimeUtc(p.Key) == p.Value.Written), "只改一张表重写了其他表。");
+            Check(changed.Published && changed.VersionId != first.VersionId, "数据变化被错误复用。");
+            await Repeat(changed.VersionId!);
+            Edit(sheet => sheet.Cell(6, 2).Value = originalName);
+            var reverted = await Export();
+            Check(reverted.VersionId == first.VersionId && originalFiles.All(p => File.ReadAllBytes(p.Key).SequenceEqual(p.Value.Bytes)), "恢复原数据未得到相同清单内容，会产生缓存身份冲突。");
+            Edit(sheet => sheet.Cell(6, 2).Value = format + "-changed");
+            await Export();
+            var manifest = ReleaseHistory.TryReadCurrent(output)!;
+            var table = manifest.Tables.Single(t => t.Name == "Stable");
+            string damaged = ExportTestPaths.FilePath(output, table.JsonFile ?? table.File);
+            File.WriteAllText(damaged, "broken");
+            var repaired = await Export();
+            Check(repaired.Published && repaired.VersionId == changed.VersionId && File.ReadAllText(damaged) != "broken" && repaired.UpdatedTables == 1, "损坏数据未通过新版本修复或覆盖了旧版本。");
+            await Repeat(repaired.VersionId!);
+            manifest = ReleaseHistory.TryReadCurrent(output)!;
+            File.Delete(ExportTestPaths.FilePath(output, manifest.Tables.Single(t => t.Name == "Stable").File));
+            var restored = await Export();
+            Check(restored.Published && restored.VersionId == repaired.VersionId && restored.UpdatedTables == 1, "缺失表文件被错误复用。");
+            await Repeat(restored.VersionId!);
+            Console.WriteLine($"通过：{format} 固定路径、未改表时间戳不变、只更新改动表、格式切换及损坏/缺失修复。");
+        }
+        string active = ReleaseHistory.TryReadCurrent(output)!.VersionId;
+        var before = Saved();
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var operation = new WorkflowOperation(cancellation.Token, new CallbackProgress<OperationProgress>(p => { if (p.Stage == "unchanged") cancellation.Cancel(); }));
+            var cancelled = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false), operation: operation);
+            Check(cancelled.Cancelled && !cancelled.Success && cancelled.Export is { ReusedVersion: false, Published: false }, "版本复用忽略取消。");
+            Unchanged(before);
+        }
+        var changing = new WorkflowOperation(progress: new CallbackProgress<OperationProgress>(p => { if (p.Stage == "unchanged") Edit(sheet => sheet.Column(2).Width += 1); }));
+        var interrupted = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false), operation: changing);
+        Check(!interrupted.Success, "版本复用忽略了运行期间的输入变化。");
+        Unchanged(before);
+        File.WriteAllText(rulePath, "using ZrConfig.Models; using ZrConfig.Validation; public sealed class StableRules : TableRules<StableConfig> { protected override void Validate(StableConfig row, ValidationContext context) { context.Error(row, nameof(StableConfig.Name), \"blocked\", \"STABLE_RULE_ERROR\"); } }");
+        var blocked = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false));
+        Check(!blocked.Success && blocked.Export!.Diagnostics.Any(d => d.Code == "STABLE_RULE_ERROR"), "相同数据绕过了本轮规则检查。");
+        Unchanged(before);
+        File.WriteAllText(rulePath, goodRule + " // updated validation source");
+        await Repeat(active);
+        string project = Path.Combine(root, "project.zrconfig.json");
+        settings.SaveProject(project);
+        using var cli = new StringWriter();
+        using (ConfigText.UseLanguage(ConfigText.Chinese))
+            Check(ToolCommandRunner.Run(["export", "--project", project], cli, cli) == 0 && cli.ToString().Contains("数据未变化", StringComparison.Ordinal), "CLI 未报告稳定导出结果：" + cli);
+        Unchanged(before);
+        File.WriteAllText(Path.Combine(code, "Notes.cs"), "// changed model source fingerprint");
+        var codeChanged = await Export();
+        Check(codeChanged.Published && codeChanged.VersionId != active, "代码兼容信息变化仍复用旧版本。");
+        await Repeat(codeChanged.VersionId!);
+        File.WriteAllText(current, "invalid-json");
+        var manifestRepaired = await Export();
+        Check(manifestRepaired.Published, "损坏入口清单未恢复。");
+        await Repeat(manifestRepaired.VersionId!);
+        before = Saved();
+        Edit(sheet => sheet.Cell(6, 2).Value = "rollback");
+        using (var cancellation = new CancellationTokenSource())
+        {
+            var operation = new WorkflowOperation(cancellation.Token, new CallbackProgress<OperationProgress>(p => { if (p.Stage == "preparing-output") cancellation.Cancel(); }));
+            var cancelled = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false), operation: operation);
+            Check(cancelled.Cancelled && !cancelled.Success, "写入前取消未生效。");
+            Unchanged(before);
+        }
+        var failed = await ProjectWorkflow.ExportAsync(settings, _ => Task.FromResult(false), operation: new WorkflowOperation { ExportFileOperations = new FailingExportWrite() });
+        Check(!failed.Success, "写入故障未报告失败。");
+        Unchanged(before);
+        await Export();
+        // Migrate an existing flat export without leaving a second managed data tree.
+        var groupedManifest = ReleaseHistory.TryReadCurrent(output)!;
+        foreach (var entry in groupedManifest.Tables)
+            foreach (string file in new[] { entry.File, entry.JsonFile }.OfType<string>())
+                File.Move(ExportTestPaths.FilePath(output, file), Path.Combine(output, file));
+        File.Delete(current);
+        File.WriteAllText(Path.Combine(output, "current.json"), JsonSerializer.Serialize(groupedManifest with { Layout = "flat" }, ReleaseHistory.JsonOptions));
+        File.WriteAllText(Path.Combine(output, "unmanaged.json"), "user data");
+        await Export();
+        Check(!File.Exists(Path.Combine(output, "current.json")) && !File.Exists(Path.Combine(output, "Stable.bytes")) && File.ReadAllText(Path.Combine(output, "unmanaged.json")) == "user data", "旧 flat 布局迁移残留受管文件或删除了用户文件。");
+        // 模拟升级前的发布：固定目录首次导出保留旧版本及用户文件。
+        var legacy = ReleaseHistory.TryReadCurrent(output)!;
+        string legacyFolder = Path.Combine(versions, legacy.VersionId);
+        Directory.CreateDirectory(legacyFolder);
+        foreach (var file in Saved().Where(p => p.Key != current)) File.Move(file.Key, Path.Combine(legacyFolder, Path.GetFileName(file.Key)));
+        File.Delete(current);
+        File.WriteAllText(Path.Combine(output, "current.json"), JsonSerializer.Serialize(legacy with { Layout = null }, ReleaseHistory.JsonOptions));
+        File.WriteAllText(Path.Combine(output, "user.txt"), "keep");
+        var oldFiles = Directory.GetFiles(legacyFolder).ToDictionary(p => p, File.ReadAllBytes);
+        var migrated = await Export();
+        Check(migrated.UpdatedTables == 2 && !File.Exists(Path.Combine(output, "current.json")) && ReleaseHistory.TryReadCurrent(output)!.Layout == "grouped" && oldFiles.All(p => File.ReadAllBytes(p.Key).SequenceEqual(p.Value)) && File.ReadAllText(Path.Combine(output, "user.txt")) == "keep", "旧版本迁移未保留旧数据/用户文件。");
+        Directory.Delete(versions, true); // 仅清理本测试建立的旧版夹具。
+        settings = settings with { Target = ConfigTarget.Server, CodeFolder = Path.Combine(root, "ServerConfig") };
+        Check((await ProjectWorkflow.GenerateAsync(settings, _ => Task.FromResult(false))).Success, "S 端生成失败。");
+        var server = await Export();
+        Check(server.Published && ReleaseHistory.TryReadCurrent(output)!.Target == "S", "切换目标端仍复用 C 端版本。");
+        await Repeat(server.VersionId!);
+        Console.WriteLine("通过：固定目录导出的 CLI、规则重检、取消、故障回滚、旧版迁移、C/S 切换及清单修复。");
+    }
+
+    private sealed class FailingExportWrite : GenerationFileOperations
+    {
+        private int writes;
+        internal override void Write(string path, byte[] bytes, bool restoring)
+        {
+            base.Write(path, bytes, restoring);
+            if (!restoring && ++writes == 2) throw new IOException("Injected partial export failure");
+        }
+    }
+
+    private static async Task CheckSingleLanguageExports(string root, WorkspaceSettings original)
+    {
+        string target = ConfigTargets.Marker(original.Target);
+        string[] formats = ["binary", "json", "both"];
+        var saved = Directory.GetFiles(Path.Combine(original.CodeFolder, "Generated"), "*", SearchOption.AllDirectories)
+            .Append(Path.Combine(original.CodeFolder, ".schema.json"))
+            .Append(Path.Combine(original.CodeFolder, ".generation.json"))
+            .ToDictionary(path => path, File.ReadAllBytes);
+        foreach (string language in original.CodeLanguages.OrderBy(language => language != "csharp"))
+        {
+            string folder = Path.Combine(root, "single-languages", language);
+            var settings = original with { CodeLanguages = [language], OutputFolder = Path.Combine(folder, "Output") };
+            bool generationConfirmed = false;
+            var generation = await ProjectWorkflow.GenerateAsync(settings, _ =>
+            {
+                generationConfirmed = true;
+                return Task.FromResult(false);
+            });
+            Check(generation.Success && generation.CodeCommitted && !generationConfirmed && generation.Plan is { HasApiChanges: false, RemovedFiles.Count: 0 },
+                "选择单一语言生成不应删除其他语言或要求 API 迁移：" + language);
+            Check(saved.All(file => File.Exists(file.Key) && File.ReadAllBytes(file.Key).SequenceEqual(file.Value)),
+                "单语言重复生成改写了原有源码或 API 基线：" + language);
+            foreach (string format in formats)
+            {
+                bool confirmed = false;
+                var exported = await ProjectWorkflow.ExportAsync(settings with { DataFormat = format }, _ =>
+                {
+                    confirmed = true;
+                    return Task.FromResult(false);
+                });
+                Check(exported.Success && exported.Export?.Published == true && !exported.CodeCommitted && !confirmed,
+                    $"选择 {language}/{format} 导出不应删除已有语言或要求 API 迁移：" + Describe(exported));
+                string languageRoot = Path.Combine(settings.OutputFolder, ExportOptions.LanguageDirectory(language));
+                var manifest = ReleaseHistory.TryReadCurrent(languageRoot)!;
+                Check(manifest.Layout == "grouped" && File.Exists(Path.Combine(languageRoot, "Common", "current.json")), "清单未放入语言/Common。");
+                foreach (var entry in manifest.Tables)
+                    foreach (string file in new[] { entry.File, entry.JsonFile }.OfType<string>())
+                        Check(File.Exists(Path.Combine(languageRoot, "Tables", file.EndsWith(".json", StringComparison.Ordinal) ? "json" : "bytes", file)), "表文件未按格式归类：" + file);
+                Check(!Directory.Exists(Path.Combine(languageRoot, "versions")) && Directory.GetFiles(languageRoot).Length == 0, "语言根目录残留散落数据文件。");
+                var timestamps = Directory.GetFiles(languageRoot, "*", SearchOption.AllDirectories).ToDictionary(p => p, File.GetLastWriteTimeUtc);
+                var repeat = await ProjectWorkflow.ExportAsync(settings with { DataFormat = format }, _ => Task.FromResult(false));
+                Check(repeat.Export is { ReusedVersion: true, UpdatedTables: 0 } && timestamps.All(p => File.GetLastWriteTimeUtc(p.Key) == p.Value), "单语言重复导出改写文件。");
+                var validated = await ProjectWorkflow.ValidateAsync(settings with { DataFormat = format });
+                Check(validated.Success && !validated.NeedsGeneration, "单语言导出后校验失败：" + Describe(validated));
+                Check(saved.All(file => File.Exists(file.Key) && File.ReadAllBytes(file.Key).SequenceEqual(file.Value)),
+                    "单语言导出或校验改写了已有生成源码/API 基线。");
+            }
+
+            string languageFolder = ExportOptions.LanguageDirectory(language);
+            Check(Directory.GetDirectories(settings.OutputFolder).Where(p => Path.GetFileName(p) != "Logs" && !Path.GetFileName(p).StartsWith(".", StringComparison.Ordinal)).Select(Path.GetFileName).SequenceEqual(new[] { languageFolder }), "单选导出创建了其他语言目录。");
+            var otherLanguages = original.CodeLanguages.Where(l => l != language).SelectMany(l => Directory.GetFiles(Path.Combine(original.OutputFolder, ExportOptions.LanguageDirectory(l)), "*", SearchOption.AllDirectories))
+                .ToDictionary(p => p, p => (Bytes: File.ReadAllBytes(p), Written: File.GetLastWriteTimeUtc(p)));
+            var selected = original with { CodeLanguages = [language], DataFormat = "json" };
+            Check((await ProjectWorkflow.ExportAsync(selected, _ => Task.FromResult(false))).Success, "已有多语言目录切换单选失败。");
+            Check(otherLanguages.All(p => File.ReadAllBytes(p.Key).SequenceEqual(p.Value.Bytes) && File.GetLastWriteTimeUtc(p.Key) == p.Value.Written), "单语言导出修改了未选语言的数据或清单。");
+            Check((await ProjectWorkflow.ExportAsync(original with { CodeLanguages = [language] }, _ => Task.FromResult(false))).Success, "恢复所选语言格式失败。");
+
+            string code = Path.Combine(folder, "Config");
+            Directory.CreateDirectory(code);
+            foreach (string file in new[] { "Types.cs", "Tables.json" })
+                File.Copy(Path.Combine(original.CodeFolder, file), Path.Combine(code, file));
+            var fresh = settings with
+            {
+                CodeFolder = code,
+                Namespaces = new GenerationNamespaces(Go: "example.invalid/single", TypeScript: "single-language")
+            };
+            var firstGeneration = await ProjectWorkflow.GenerateAsync(fresh, _ => Task.FromResult(false));
+            Check(firstGeneration.Success && firstGeneration.CodeCommitted, "首次单语言生成失败：" + Describe(firstGeneration));
+            var freshFiles = Directory.GetFiles(Path.Combine(code, "Generated"), "*", SearchOption.AllDirectories)
+                .Append(Path.Combine(code, ".schema.json")).Append(Path.Combine(code, ".generation.json"))
+                .ToDictionary(path => path, File.ReadAllBytes);
+            foreach (string format in formats)
+            {
+                var formatSettings = fresh with { DataFormat = format };
+                var repeated = await ProjectWorkflow.GenerateAsync(formatSettings, _ => Task.FromResult(false));
+                Check(repeated.Success && repeated.Plan is { HasChanges: false }, $"{target}/{language}/{format} 重复生成失败或生成内容不稳定：" + Describe(repeated));
+                var exported = await ProjectWorkflow.ExportAsync(formatSettings, _ => Task.FromResult(false));
+                Check(exported.Success && !exported.CodeCommitted && exported.Export?.Published == true, "首次单语言导出失败：" + Describe(exported));
+                Check((await ProjectWorkflow.ValidateAsync(formatSettings)).Success, $"{target}/{language}/{format} 单语言生成后校验失败。");
+                Check(freshFiles.All(file => File.Exists(file.Key) && File.ReadAllBytes(file.Key).SequenceEqual(file.Value)),
+                    $"{target}/{language}/{format} 重复生成/导出/校验改写了已有源码或 API 基线。");
+            }
+            string[] nativeFolders = Directory.GetDirectories(Path.Combine(code, "Generated")).Select(Path.GetFileName).ToArray()!;
+            string? expected = language switch
+            {
+                "csharp" => null, "cpp" => "Cpp", "go" => "Go", "java" => "Java",
+                "lua" => "Lua", "rust" => "Rust", "typescript" => "TypeScript", _ => throw new Exception(language)
+            };
+            Check(expected == null ? nativeFolders.Length == 0 : nativeFolders.SequenceEqual(new[] { expected }),
+                "单语言生成产生了未选择语言的目录：" + language + ": " + string.Join(",", nativeFolders));
+            using var languageLog = new StringWriter();
+            Check(ToolCommandRunner.Run(["codegen", original.DataFolder, original.CodeFolder, "--target", target, "--languages", language], languageLog, languageLog) == 0,
+                $"CLI {target}/{language} 单语言生成失败：" + languageLog);
+            Check(saved.All(file => File.ReadAllBytes(file.Key).SequenceEqual(file.Value)), "CLI 单语言生成改写了已有源码/API 基线。");
+            Console.WriteLine($"通过：{target}/{language} 首次生成、重复生成、多选转单选、CLI 生成、三种格式导出/校验及其他语言保留。");
+        }
+        using var cliLog = new StringWriter();
+        Check(ToolCommandRunner.Run(["codegen", original.DataFolder, original.CodeFolder, "--target", target, "--languages", "csharp", "--prune-languages", "--accept-changes"], cliLog, cliLog) == 1 &&
+            cliLog.ToString().Contains("API_CHANGE_REQUIRED", StringComparison.Ordinal), "显式清理语言绕过了 API 迁移保护。");
+        Check(saved.All(file => File.ReadAllBytes(file.Key).SequenceEqual(file.Value)), "未批准语言清理仍改写了生成源码/API 基线。");
+        Check(ToolCommandLine.Parse(["codegen", "--project", "project.zrconfig.json", "--prune-languages"]).PruneLanguages,
+            "项目模式丢失显式语言清理参数。");
+        Reject(() => ToolCommandLine.Parse(["export", "--prune-languages"]));
+        Reject(() => ToolCommandLine.Parse(["validate", "--prune-languages"]));
+        Reject(() => ToolCommandLine.Parse(["codegen", "--prune-languages", "--prune-languages"]));
+        Console.WriteLine($"通过：{target} 端七语言单选完整矩阵及显式语言清理保护。");
+    }
+
     private static string CheckSourceMappings(string root,string originalData,string originalCode,string originalOutput)
     {
         string mapped=Path.Combine(root,"source-mapped"),data=Path.Combine(mapped,"Data"),code=Path.Combine(mapped,"Config");
@@ -195,7 +500,7 @@ internal static class PortableExportTests
         foreach(var invalid in new[]{new[]{new SourceNameMapping("Entry","Missing","X")},new[]{new SourceNameMapping("Entry","Name","Id")},new[]{new SourceNameMapping("Entry","Name","X"),new SourceNameMapping("Entry","Name","Y")}})
             Check(ModelGenerator.PrepareWithSourceMappings(invalid,null,"auto",data,code,new DiagnosticCollector(),target:ConfigTarget.Server,languages:["all"])==null,"Unknown or ambiguous source mapping was accepted.");
         string output=Path.Combine(mapped,"Output");var exported=ExportPipeline.RunWithSources(data,output,code,"",target:ConfigTarget.Server,dataFormat:"both");Check(exported.Success,string.Join("\n",exported.Diagnostics));
-        var original=JsonNode.Parse(File.ReadAllText(Path.Combine(originalOutput,"current.json")))!;var current=JsonNode.Parse(File.ReadAllText(Path.Combine(output,"current.json")))!;
+        var original=JsonNode.Parse(File.ReadAllText(ExportTestPaths.FilePath(originalOutput, "current.json")))!;var current=JsonNode.Parse(File.ReadAllText(ExportTestPaths.FilePath(output, "current.json")))!;
         Check(original["tables"]!.ToJsonString()==current["tables"]!.ToJsonString(),"Source rename/reorder changed table identity, bytes or hashes.");
         using var compiled=RuleCompiler.PrepareSources(code,"",Path.Combine(mapped,"cache"),diagnostics)??throw new Exception(string.Join("\n",diagnostics.Snapshot()));
         var assemblyExport=ExportPipeline.Run(data,Path.Combine(mapped,"AssemblyOutput"),compiled.Assembly,ConfigTarget.Server,"both");Check(assemblyExport.Success,string.Join("\n",assemblyExport.Diagnostics));
@@ -212,7 +517,7 @@ internal static class PortableExportTests
         using var log=new StringWriter();Check(ToolCommandRunner.Run(command,log,log)==0,log.ToString());
         Check((Baseline().Policy!.SourceMappings?.Length??0)==0&&before.Symbols.SequenceEqual(Baseline().Symbols),"Explicit mapping reset changed API or retained aliases.");
         var resetExport=ExportPipeline.RunWithSources(data,Path.Combine(mapped,"ResetOutput"),code,"",target:ConfigTarget.Server,dataFormat:"both");Check(resetExport.Success,string.Join("\n",resetExport.Diagnostics));
-        var resetManifest=JsonNode.Parse(File.ReadAllText(Path.Combine(mapped,"ResetOutput","current.json")))!;
+        var resetManifest=JsonNode.Parse(File.ReadAllText(ExportTestPaths.FilePath(Path.Combine(mapped,"ResetOutput"),"current.json")))!;
         Check(original["tables"]!.ToJsonString()==resetManifest["tables"]!.ToJsonString(),"Mapping reset changed exported identity or bytes.");
         Console.WriteLine("通过：列移动、源表/字段两次重命名保留公开 API、SymbolId、参数顺序与两种数据字节；源码和 DLL 导出均继承映射。");
         Console.WriteLine("通过：空映射保留当前绑定；CLI 显式恢复源名需迁移凭据，恢复后公开 API 与双格式字节不变。");
@@ -327,7 +632,7 @@ internal static class PortableExportTests
             using var compiled=RuleCompiler.PrepareSources(code,"",Path.Combine(root,"namespace-cache-"+id),diagnostics)??throw new Exception(string.Join("\n",diagnostics.Snapshot()));
             var catalog=(ZrConfig.Runtime.Server.Catalog)compiled.Assembly.GetType("Game"+id.ToUpperInvariant()+".Config.ServerCatalog")!.GetProperty("Instance")!.GetValue(null)!;
             using var manager=new ZrConfig.Runtime.Server.Manager(catalog,text=>JsonSerializer.Deserialize<ConfigManifest>(text,new JsonSerializerOptions{IncludeFields=true})!);
-            var snapshot=manager.Reload(new FileConfigSource(output)).Snapshot;
+            var snapshot=manager.Reload(new FileConfigSource(ExportTestPaths.Root(output))).Snapshot;
             Check(snapshot.AsLegacySnapshot().Tables.Single(t=>t.Name=="Entry").Rows[0]!.GetType().Namespace=="Game"+id.ToUpperInvariant()+".Config","Custom CLR model namespace missing");
             paths.Add(Path.Combine(code,"Generated"));
         }
@@ -348,7 +653,7 @@ internal static class PortableExportTests
         // No table payloads are copied: catalog mismatches must fail before any payload I/O.
         foreach (string kind in new[] { "extra", "missing", "replaced" })
         {
-            var manifest = JsonNode.Parse(File.ReadAllText(Path.Combine(output, "current.json")))!;
+            var manifest = JsonNode.Parse(File.ReadAllText(ExportTestPaths.FilePath(output, "current.json")))!;
             var tables = manifest["tables"]!.AsArray();
             JsonNode ghost = tables[0]!.DeepClone();
             ghost["name"] = "Ghost"; ghost["file"] = "Ghost.bytes"; ghost["jsonFile"] = "Ghost.json";
@@ -616,4 +921,39 @@ internal static class PortableExportTests
           }
         }catch(const std::exception&e){std::cerr<<e.what()<<std::endl;return 1;}return 0;}
         """;
+}
+
+// Shared fixture paths: exported data is grouped; hand-built legacy fixtures keep their original layout.
+internal static class ExportTestPaths
+{
+    internal static string Root(string folder)
+    {
+        string csharp = Path.Combine(folder, "CSharp");
+        return File.Exists(Path.Combine(csharp, "Common", "current.json")) ? csharp : folder;
+    }
+    internal static string FilePath(string folder, string file)
+    {
+        string root = Root(folder);
+        if (file == "Common/current.json") file = "current.json";
+        if (System.IO.File.Exists(Path.Combine(root, "Common", "current.json")))
+            return Path.Combine(root, file == "current.json" ? "Common/current.json" : "Tables/" + (file.EndsWith(".json", StringComparison.Ordinal) ? "json/" : "bytes/") + file);
+        return Path.Combine(root, file);
+    }
+    // Exercise old flat bundles as well as the new grouped fixtures, without mutating exported data.
+    internal static string FlatFixture(string folder, string destination)
+    {
+        string root = Root(folder);
+        var manifest = JsonNode.Parse(System.IO.File.ReadAllBytes(FilePath(folder, "current.json")))!;
+        Directory.CreateDirectory(destination);
+        foreach (var table in manifest["tables"]!.AsArray())
+            foreach (string field in new[] { "file", "jsonFile" })
+                if (table![field] is { } value)
+                {
+                    string file = value.GetValue<string>();
+                    System.IO.File.Copy(FilePath(folder, file), Path.Combine(destination, file), true);
+                }
+        manifest["layout"] = "flat";
+        System.IO.File.WriteAllText(Path.Combine(destination, "current.json"), manifest.ToJsonString());
+        return destination;
+    }
 }

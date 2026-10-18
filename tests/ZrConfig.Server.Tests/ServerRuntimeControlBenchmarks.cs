@@ -6,7 +6,7 @@ using ZrConfig.Core;
 // samples do not contaminate cold-load/query allocation windows in other reports.
 internal static class ServerRuntimeControlBenchmarks
 {
-    internal static void WriteGraphs(string output,List<object> builds)
+    internal static void WriteGraphs(string[] outputs,List<object> builds)
     {
         foreach(string kind in new[]{"chain","dense","independent"})
         {
@@ -16,7 +16,7 @@ internal static class ServerRuntimeControlBenchmarks
             var samples=new double[3];RuntimeCatalogDescriptor? catalog=null;
             for(int repeat=0;repeat<3;repeat++){var timer=Stopwatch.StartNew();catalog=RuntimeCatalog.Create(source);samples[repeat]=timer.Elapsed.TotalMilliseconds;}
             if(catalog!.Tables.Length!=count||catalog.Components.Length!=(kind=="dense"?1:count))throw new Exception("Graph SCC mismatch");
-            string json=catalog.Serialize();File.WriteAllText(Path.Combine(output,"graph-"+kind+".json"),json);
+            string json=catalog.Serialize();foreach(string output in outputs)File.WriteAllText(Path.Combine(output,"graph-"+kind+".json"),json);
             builds.Add(new{language="generator-graph",kind,tables=count,edges=source.Sum(t=>t.Dependencies.Length),components=catalog.Components.Length,scc_samples_ms=samples,catalog_bytes=System.Text.Encoding.UTF8.GetByteCount(json)});
         }
     }

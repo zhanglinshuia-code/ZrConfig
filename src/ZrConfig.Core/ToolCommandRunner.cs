@@ -24,6 +24,7 @@ public static class ToolCommandRunner
                 }
             }));
             var options = ToolCommandLine.Parse(args);
+            operation.PruneLanguages = options.PruneLanguages;
             operation.ApiChangeId = options.ApiChangeId;
             if(options.SourceMappingsFile!=null)
             {
@@ -86,10 +87,15 @@ public static class ToolCommandRunner
 
             if (options.Command == "codegen")
             {
+                // 生成不使用输出/规则目录；只校验这两个实际参与生成的路径。
+                var generationSettings = new WorkspaceSettings(data, "", code, "")
+                {
+                    Target = target, DataFormat = dataFormat, CodeLanguages = languages, RuntimeFamily = runtimeFamily, Namespaces=project?.Namespaces
+                };
                 if (options.ApiVerificationFile != null)
                 {
                     var verificationDiagnostics = new DiagnosticCollector();
-                    var candidate = ModelGenerator.PrepareWithNamespaces(project?.Namespaces,runtimeFamily,data,code,verificationDiagnostics,target:target,operation:operation,languages:languages,dataFormat:dataFormat);
+                    var candidate = ModelGenerator.PrepareWithNamespaces(project?.Namespaces,runtimeFamily,data,code,verificationDiagnostics,target:target,operation:operation,languages:ProjectWorkflow.PreparationLanguages(generationSettings,operation),dataFormat:dataFormat);
                     foreach (var diagnostic in verificationDiagnostics.Snapshot()) output.WriteLine(diagnostic);
                     if (candidate?.MigrationRequest == null) { if(candidate!=null)output.WriteLine(candidate.DescribeChanges());return 1; }
                     string receiptPath = Path.GetFullPath(options.MigrationReceiptFile!);
@@ -101,11 +107,6 @@ public static class ToolCommandRunner
                     System.Text.Json.JsonSerializer.Serialize(receiptFile,receipt,new System.Text.Json.JsonSerializerOptions{WriteIndented=true});
                     output.WriteLine("消费方验收已完成，项目文件未写入。审阅迁移凭据："+receiptPath);return 0;
                 }
-                // 生成不使用输出/规则目录；只校验这两个实际参与生成的路径。
-                var generationSettings = new WorkspaceSettings(data, "", code, "")
-                {
-                    Target = target, DataFormat = dataFormat, CodeLanguages = languages, RuntimeFamily = runtimeFamily, Namespaces=project?.Namespaces
-                };
                 ProjectWorkflowResult generation = Task.Run(() => ProjectWorkflow.GenerateAsync(generationSettings,
                     ConfirmGenerationAsync, operation: operation))
                     .GetAwaiter()
@@ -176,7 +177,7 @@ public static class ToolCommandRunner
             }
             else
             {
-                result = ExportPipeline.RunWithSources(data, destination, code, rules, options.RulesDebug, target, operation, dataFormat);
+                result = ExportPipeline.RunWithSources(data, destination, code, rules, options.RulesDebug, target, operation, dataFormat, languages);
             }
 
             foreach (Diagnostic diagnostic in result.Diagnostics)
@@ -190,7 +191,9 @@ public static class ToolCommandRunner
             output.WriteLine(ConfigText.Get($"诊断报告：{result.DiagnosticFile}", $"Diagnostics: {result.DiagnosticFile}"));
             if (result.VersionId != null)
             {
-                output.WriteLine(ConfigText.Get($"当前版本：{result.VersionId}", $"Active version: {result.VersionId}"));
+                output.WriteLine(result.ReusedVersion
+                    ? ConfigText.Get("数据未变化，固定目录中的文件保持不变。", "Data unchanged; files in the fixed output directory were preserved.")
+                    : ConfigText.Get($"导出完成，更新 {result.UpdatedTables} 张表。", $"Export complete; updated {result.UpdatedTables} tables."));
             }
 
             if (options.ReportFile != null)
@@ -227,6 +230,7 @@ public static class ToolCommandRunner
         output.WriteLine("  validate --project <project.zrconfig.json> [--target C|S] [--report report.json]");
         output.WriteLine("  release --help");
         output.WriteLine("  --languages csharp,java,go,cpp,lua,typescript,rust | all    目标语言，与 C/S 独立选择");
+        output.WriteLine("  --prune-languages                                     codegen 显式移除未选择语言；仍须 API 迁移验收");
         output.WriteLine("  --source-map <JSON>                                   codegen 显式绑定源表/字段新名；须经过精确迁移验收");
         output.WriteLine("  --runtime-family auto | legacy-v1 | server-v1           auto 保留已有项目家族；server-v1 增加服务器入口");
         output.WriteLine("  --format binary|json|both             正式数据格式，默认 binary");

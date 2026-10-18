@@ -19,6 +19,7 @@ public sealed record ToolCommandLine(string Command,
     public string? MigrationReceiptFile { get; init; }
     public string? RuntimeFamily { get; init; }
     public string? SourceMappingsFile { get; init; }
+    public bool PruneLanguages { get; init; }
     public string PathAt(int index, string fallback) => Paths.Length > index ? Paths[index] : fallback;
     public static ToolCommandLine Parse(string[] args)
     {
@@ -55,6 +56,7 @@ public sealed record ToolCommandLine(string Command,
         bool debug = false;
         bool accept = false;
         bool generate = false;
+        bool pruneLanguages = false;
         bool literal = false;
         string? project = null;
         string? report = null;
@@ -160,6 +162,10 @@ public sealed record ToolCommandLine(string Command,
                 {
                     generate = true;
                 }
+                else if (argument == "--prune-languages" && command == "codegen" && !pruneLanguages)
+                {
+                    pruneLanguages = true;
+                }
                 else if (argument == "--accept-changes" && command is "codegen" or "export" && !accept)
                 {
                     accept = true;
@@ -196,7 +202,7 @@ public sealed record ToolCommandLine(string Command,
             }
 
             ValidateMigration();
-            return new(command, [], debug, accept, false, project, generate, target, report, dataFormat, languages) { SourceMappingsFile=sourceMappings, ApiChangeId = apiChangeId, RuntimeFamily = runtimeFamily, ApiVerificationFile=apiVerification, MigrationReceiptFile=migrationReceipt };
+            return new(command, [], debug, accept, false, project, generate, target, report, dataFormat, languages) { PruneLanguages=pruneLanguages, SourceMappingsFile=sourceMappings, ApiChangeId = apiChangeId, RuntimeFamily = runtimeFamily, ApiVerificationFile=apiVerification, MigrationReceiptFile=migrationReceipt };
         }
 
         if ((command is "codegen" or "validate" && paths.Count == 1) || (command == "export" && paths.Count is 1 or 2))
@@ -217,7 +223,7 @@ public sealed record ToolCommandLine(string Command,
         }
 
         ValidateMigration();
-        return new(command, paths.ToArray(), debug, accept, false, Generate: generate, Target: target, ReportFile: report, DataFormat: dataFormat, CodeLanguages: languages) { SourceMappingsFile=sourceMappings, ApiChangeId = apiChangeId, RuntimeFamily = runtimeFamily, ApiVerificationFile=apiVerification, MigrationReceiptFile=migrationReceipt };
+        return new(command, paths.ToArray(), debug, accept, false, Generate: generate, Target: target, ReportFile: report, DataFormat: dataFormat, CodeLanguages: languages) { PruneLanguages=pruneLanguages, SourceMappingsFile=sourceMappings, ApiChangeId = apiChangeId, RuntimeFamily = runtimeFamily, ApiVerificationFile=apiVerification, MigrationReceiptFile=migrationReceipt };
 
         void ValidateMigration()
         {

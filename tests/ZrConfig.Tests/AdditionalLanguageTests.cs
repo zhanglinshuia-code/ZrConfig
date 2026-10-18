@@ -70,7 +70,7 @@ internal static class AdditionalLanguageTests
         using (var manifest = JsonDocument.Parse(File.ReadAllText(Path.Combine(output,"current.json"))))
         {
             string version = manifest.RootElement.GetProperty("versionId").GetString()!;
-            string folder = Path.Combine(broken,"versions",version);Directory.CreateDirectory(folder);
+            string folder = broken;Directory.CreateDirectory(folder);
             File.Copy(Path.Combine(output,"current.json"),Path.Combine(broken,"current.json"),true);
             foreach (var entry in manifest.RootElement.GetProperty("tables").EnumerateArray())
             {

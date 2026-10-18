@@ -59,7 +59,7 @@ namespace ZrConfig.Sample
             {
 #if UNITY_EDITOR
                 // Assets -> 示例工程 -> unity -> 仓库；所有示例使用同一份正式导出。
-                return Path.GetFullPath(Path.Combine(Application.dataPath, "../../../samples/Output"));
+                return Path.GetFullPath(Path.Combine(Application.dataPath, "../../../samples/Output/CSharp"));
 #else
                 return Path.Combine(Application.streamingAssetsPath, "ZrConfig");
 #endif
@@ -128,7 +128,7 @@ namespace ZrConfig.Sample
                 }
 
                 _status = Mode + "清单就绪 · " + DateTime.Now.ToString("HH:mm:ss");
-                OnResourceTrace("发布快照 · " + snapshot.VersionId + " · 已加载 " + snapshot.LoadedRowCount + " 行");
+                OnResourceTrace("配置已加载 · " + snapshot.LoadedRowCount + " 行");
             }
             catch (OperationCanceledException)
             {
@@ -342,7 +342,7 @@ namespace ZrConfig.Sample
                 Ready = snapshot != null,
                 Busy = _busy,
                 Status = _status,
-                Overview = snapshot == null ? "尚未加载配置。" : "版本：" + snapshot.VersionId + " · 已加载 " + snapshot.LoadedRowCount + " 行",
+                Overview = snapshot == null ? "尚未加载配置。" : "已加载 " + snapshot.LoadedRowCount + " 行",
                 Tables = tables.Length == 0 ? "尚未显式加载整表。" : tables.ToString(),
                 Hero = _heroResult,
                 Drops = _dropResult,
@@ -415,7 +415,7 @@ namespace ZrConfig.Sample
                         }
 
                         GUI.enabled = previousEnabled;
-                        GUILayout.Label("重载只读取版本清单；点击查询时加载对应行，掉落分组查询加载掉落表。", _body);
+                        GUILayout.Label("重载只读取数据清单；点击查询时加载对应行，掉落分组查询加载掉落表。", _body);
                         GUILayout.Label(_useAsync ? "LoadAsync → AB.ReadAsync → 清单；GetHeroAsync → 英雄；GetSkillAsync → 引用。" : "Load → AB.Read → 清单；GetHero → 英雄；hero.Skill → 引用。",
                             _body);
                         GUILayout.Label("切换模式共用缓存；要观察完整读取链，切换后先重新加载，再点击查询。", _body);

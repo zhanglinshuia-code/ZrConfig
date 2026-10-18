@@ -56,7 +56,7 @@
 | QuestRewards | 3 |
 | 合计 | 10,024 |
 
-AllTypes 的多行动作会先合并为逻辑记录，所以 Excel 的物理行数不等于表记录数。交付 current.json 及其引用的全部 `.bytes` 和 `.json` 表数据，保留版本相对路径；共用示例的双格式清单同时引用两者。管理记录、`.rows.json` 行快照和诊断留在工具侧。以本次成功结果和当前清单为准，不能只看 Output 中已有文件就认定成功。
+AllTypes 的多行动作会先合并为逻辑记录，所以 Excel 的物理行数不等于表记录数。交付 current.json 及其引用的全部 `.bytes` 和 `.json` 表数据，按语言交付 Common 与 Tables 子目录，保留 json/bytes 分类；共用示例的双格式清单同时引用两者。诊断留在工具侧。以本次成功结果和当前清单为准，不能只看 Output 中已有文件就认定成功。
 
 ## 一万行全类型加载用例
 
@@ -122,7 +122,7 @@ powershell -File scripts/maintain.ps1 unity-sample
 
 1. Unity Hub 中添加仓库内的 `unity/ZrConfig.Sample` 工程；保持它在仓库中的相对位置。
 2. 等待 Assets 导入与编译完成，打开 `Assets/ZrConfigSample.unity`（也可用菜单 `Tools → ZrConfig → 打开示例场景`）。
-3. 点击 Play，在 Game 窗口看到 AB 加载示例、模式切换、版本号、查询面板和资源读取记录；启动只读取九张表的清单，已加载行数为 0。
+3. 点击 Play，在 Game 窗口看到 AB 加载示例、模式切换、加载状态、查询面板和资源读取记录；启动只读取九张表的清单，已加载行数为 0。
 
 未修改的正式数据应显示：英雄 1 为“火焰法师”，技能“火球”，导师为自身；英雄 3 的引用为空；掉落组 10 有两条；技能组合键 `(101, 1, 2)` 的伤害为 150。也可输入不存在的键观察空结果。
 
@@ -132,13 +132,13 @@ powershell -File scripts/maintain.ps1 unity-sample
 
 Editor 与桌面 Player 的调用链是 `ZrConfigSample → UnityConfigRuntime / 生成的查询 API → DelegateSyncConfigSource → SampleAbResources → 真实文件`。还没有接入第三方 SDK，也没有构建原生 AssetBundle；临时资源实现代替的是 AB 底层读取，清单校验、二进制解码、对象引用和缓存均真实执行。
 
-1. 默认异步模式进入场景。读取记录应只有 `ZrConfig/current.json` 请求，已加载 0 行。
-2. 点击“查询英雄”，看到 `Hero.bytes` 和 `Skill.bytes` 的异步请求、英雄与技能名称、导师和反向引用；再次查询同一英雄，本次资源读取为 0 次。
+1. 默认异步模式进入场景。读取记录应只有 `ZrConfig/Common/current.json` 请求，已加载 0 行。
+2. 点击“查询英雄”，看到 `Tables/bytes/Hero.bytes` 和 `Tables/bytes/Skill.bytes` 的异步请求、英雄与技能名称、导师和反向引用；再次查询同一英雄，本次资源读取为 0 次。
 3. 切换“同步模式”，先点击“同步重新加载配置”，再查询英雄。此时对应请求走同步入口。仅切换模式不清空缓存，因此直接查询已加载对象不会产生新的资源请求。
 4. 点击“查看空引用示例”“查询整组”“查询技能”，分别观察空引用、掉落整表分组和三字段组合键查询。两种模式都支持这些操作；输入不存在的键会显示未找到配置。
 5. 若要演示首次同步初始化，在退出 Play 后选中 `ZrConfig Sample`，取消脚本上的 `Use Async`，再 Play。同步读取会占用当前线程；异步读取完成后的解码不会自动分帧。
 
-[SampleAbResources.cs](../unity/ZrConfig.Sample/Assets/Scripts/SampleAbResources.cs) 是唯一的临时 AB 替换点。`LoadBytes` 调用 `FileConfigSource.Read`，`LoadBytesAsync` 调用真正的文件异步读取；没有用同步读取伪装异步，也没有写死演示数据。`ZrConfig/` 是示例资源地址前缀，映射到当前数据根目录，后面的 `versions/<版本号>/<表文件名>` 保持不变。Game 窗口保留最近 14 条记录，Console 也会输出请求、完成、失败和字节数。
+[SampleAbResources.cs](../unity/ZrConfig.Sample/Assets/Scripts/SampleAbResources.cs) 是唯一的临时 AB 替换点。`LoadBytes` 调用 `FileConfigSource.Read`，`LoadBytesAsync` 调用真正的文件异步读取；没有用同步读取伪装异步，也没有写死演示数据。`ZrConfig/` 是示例资源地址前缀，映射到当前数据根目录，后面使用 `Common/current.json`、`Tables/bytes/<表名>.bytes` 或 `Tables/json/<表名>.json`。Game 窗口保留最近 14 条记录，Console 也会输出请求、完成、失败和字节数。
 
 接入正式 AB 时，在这两个方法里替换读取调用并返回 `byte[]`，业务入口不需要修改。按实际框架处理地址映射、下载准备、同路径请求合并、调用方独立取消和资源句柄释放。临时文件实现不额外缓存资源，每次读取产生独立托管数组；ZrConfig 快照负责保留已加载字节和对象。正式桥接返回的字节也必须在快照使用期间持续有效且不可修改。
 
@@ -146,7 +146,7 @@ Android/iOS/WebGL Player 自动使用 `CoalescingConfigSource → StreamingAsset
 
 ### 导出后重载
 
-Editor 直接读取 `samples/Output`。Play 期间，保存已有 Excel 并在 App 中“校验并导出”，成功后点击 Game 窗口的“重新加载配置”。也可以从仓库根目录运行：
+Editor 直接读取 `samples/Output/CSharp`。Play 期间，保存已有 Excel 并在 App 中“校验并导出”，成功后点击 Game 窗口的“重新加载配置”。也可以从仓库根目录运行：
 
 ```bash
 bash scripts/dotnet.sh run --project src/ZrConfig.Cli -p:NuGetAudit=false -- export --project samples/project.zrconfig.json
@@ -201,6 +201,6 @@ Build Profiles / Build Settings 已包含示例场景；选择桌面平台，输
 
 ## 只校验与发布记录
 
-打开统一 `samples/project.zrconfig.json` 后，可先执行“只校验”，它不修改共享 Config 或 Output。结构变化时先检查生成预览；发布后从“版本历史”查看表和记录差异。CLI、兼容回滚、真实 Player 构建与报告说明见 [发布管理与验收](../docs/release-and-acceptance.md)。全部工作簿继续共用现有 Config、Rules 和 Output。
+打开统一 `samples/project.zrconfig.json` 后，可先执行“只校验”，它不修改共享 Config 或 Output。结构变化时先检查生成预览；导出只覆盖变化的表文件，目录固定且不保留新数据版本。CLI、兼容回滚、真实 Player 构建与报告说明见 [发布管理与验收](../docs/release-and-acceptance.md)。全部工作簿继续共用现有 Config、Rules 和 Output。
 
 Android/iOS/WebGL 的普通示例使用异步 StreamingAssets 读取，验收包构建与设备报告收集见 [目标平台验收](../docs/release-and-acceptance.md#真实-player-入口)。第三方 AB SDK 尚需按项目指定版本单独接入。

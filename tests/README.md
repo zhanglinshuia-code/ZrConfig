@@ -35,6 +35,12 @@ dotnet run --project tests/ZrConfig.Server.Tests -c Release -p:NuGetAudit=false
 
 默认入口强制要求六种原生工具链，并执行 C# 与六种语言的契约和消费方检查。仅验证托管部分时，在 `dotnet run` 的末尾加 `-- --managed-only`；它会明确跳过原生编译，不能计为七语言通过。`-- --api-only` 只执行 API 专项。已有构建可直接运行 `tests/ZrConfig.Server.Tests/bin/Release/net10.0/ZrConfig.Server.Tests.dll`。
 
+`-- --single-language-only` 专项覆盖 C/S 两端、七种语言分别选择后的首次/重复生成、CLI 生成及 Binary/JSON/双格式的导出与校验；逐项输出结果，检查 Common/Tables/json/Tables/bytes 的路径、重复导出不重写、多语言项目缩小选择后保留未选语言的数据/时间戳、已有源码和 API 基线、CLI 显式清理语言仍需 API 迁移，以及自定义模块设置不会生成未勾选语言的目录。此项不需要外部语言工具链，不代替七语言消费方编译验收。
+
+`-- --consumers-only` 单独运行消费方与加载验证，覆盖按语言归类的数据目录以及旧 flat/版本目录夹具；不重复单语言矩阵，可配合 `-- --single-language-only`、`-- --stable-export-only` 分项运行。
+
+`-- --stable-export-only` 检查 Binary/JSON/双格式固定目录按表更新、未改表内容与时间戳不变、Excel 样式变更、数据/格式/目标端/源码变化、规则重检、取消、输入变化、损坏或缺失数据/清单修复、写入故障恢复、旧目录迁移及 CLI 提示；不需要外部语言工具链。
+
 工具链预检输出每项工具的解析路径；缺失时指出对应环境变量及配置值。显式设置的路径不存在时不会回退到 PATH 中的其他版本；`ZRCONFIG_TYPESCRIPT` 设置后也不会回退到全局 `tsc`。TypeScript 7 使用原生 `tsc` 可执行文件（`ZRCONFIG_TSC`）；5.x/6.x 继续支持 `typescript.js`（`ZRCONFIG_TYPESCRIPT`）。CI 自动选择包提供的入口，另保存 `server-toolchains.log`，记录所选工具的路径和实际版本，便于定位最低／当前配置的安装问题。
 
 Git 克隆还可运行 `-- --trusted-ref <可信提交SHA>`，从不可变目标提交比较 API 基线和迁移链；需要该提交的完整历史，源码 ZIP 没有 Git 历史，不执行此项。选取真正的目标基线，不能用当前候选自身代替。

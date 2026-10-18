@@ -85,6 +85,7 @@ function sourcePath(root: string, relative: string): string {
     for (const part of relative.split('/')) { current=path.join(current,part); if(fs.lstatSync(current).isSymbolicLink()) throw new ConfigError('SourceUnavailable','Source path contains a symbolic link'); }
     return current;
 }
+function missingManifest(error:unknown):boolean{return error instanceof ConfigError&&error.code==='SourceUnavailable'||!!error&&typeof error==='object'&&'code'in error&&error.code==='ENOENT';}
 function readFailure(error: unknown): never {
     if (error instanceof ConfigError) throw error;
     if (error && typeof error === 'object' && 'code' in error && typeof error.code === 'string' && /^E[A-Z]+$/.test(error.code))
@@ -93,7 +94,7 @@ function readFailure(error: unknown): never {
 }
 function locatedReadFailure(error:unknown,relativePath:string):never {
     const parts=relativePath.split('/');
-    try{readFailure(error);}catch(failure){throw locateError(failure,'read',{relativePath,versionId:parts.length===3?parts[1]:undefined,table:parts.length===3?parts[2].replace(/\.[^.]+$/,''):undefined});}
+    try{readFailure(error);}catch(failure){throw locateError(failure,'read',{relativePath,versionId:parts.length===3&&parts[0]==='versions'?parts[1]:undefined,table:parts.length===3?parts[2].replace(/\.[^.]+$/,''):undefined});}
 }
 /** Immutable owned memory source; returned buffers are independent copies. */
 export class MemoryConfigSource implements ConfigSource, AsyncConfigSource {
@@ -645,6 +646,7 @@ export class Bundle {
     readonly version: string;
     readonly #entries = new Map<string, any>();
     readonly #format: string;
+    readonly #prefix: string;
     readonly root: string;
     readonly manifestDigest: string;
     readonly budget?: LoadBudget;
@@ -656,7 +658,9 @@ export class Bundle {
         this.root=typeof source==='string'?source:'';
         this.#source=typeof source==='string'?undefined:source;
         this.budget=limits?new LoadBudget(limits):undefined;
-        const bytes=this.#read('current.json',limits?.maxManifestBytes ?? Number.MAX_SAFE_INTEGER,cancellation);
+        let bytes:Uint8Array;
+        try{bytes=this.#read('Common/current.json',limits?.maxManifestBytes ?? Number.MAX_SAFE_INTEGER,cancellation);}
+        catch(error){if(!missingManifest(error))throw error;bytes=this.#read('current.json',limits?.maxManifestBytes ?? Number.MAX_SAFE_INTEGER,cancellation);}
         this.manifestDigest=crypto.createHash('sha256').update(bytes).digest('hex');
         try {
         const manifest = object(parseJSONWithBounds(decodeUTF8(bytes),limits?{rows:limits.maxTables,elements:64,members:32,stringBytes:4096,depth:8,rootArray:'tables'}:undefined));
@@ -664,6 +668,8 @@ export class Bundle {
         if(limits && array(manifest.tables).length>limits.maxTables) throw new ConfigError('LimitExceeded','Table count limit exceeded');
         if (!['ZrConfig.Binary/1', 'ZrConfig.Json/1', 'ZrConfig.Mixed/1'].includes(text(manifest.format))) { if(limits) throw new ConfigError('UnsupportedFormat','Unsupported manifest format'); invalid('清单格式无效'); }
         this.#format = manifest.format; this.version = segment(manifest.versionId);
+        if(manifest.layout!=null && manifest.layout!=="" && manifest.layout!=="flat" && manifest.layout!=="grouped") invalid("Unsupported data layout");
+        this.#prefix=manifest.layout==="grouped"?"Tables/":manifest.layout==="flat"?"":"versions/"+this.version+"/";
         for (const item of array(manifest.tables)) {
             const entry=object(item);
             const name = segment(entry.name); if (this.#entries.has(name)) invalid('表重复');
@@ -676,8 +682,8 @@ export class Bundle {
         } catch(error) { if(limits && error instanceof DataFailure) throw new ConfigError('InvalidManifest',error.message,'manifest',0n,{cause:error}); throw error; }
     }
     static async open(source: AsyncConfigSource, limits: ResourceLimits, cancellation: Cancellation): Promise<Bundle> {
-        cancellation.check(); let bytes:Uint8Array;try{bytes=await source.readAsync('current.json',limits.maxManifestBytes,cancellation);}catch(error){locatedReadFailure(error,'current.json');} cancellation.check();
-        const bundle=new Bundle({read: relative => { if(relative!=='current.json') throw new ConfigError('UnsupportedCapability','Async-only source'); return bytes; }},limits,cancellation);
+        cancellation.check(); let bytes:Uint8Array;let manifestPath='Common/current.json';try{try{bytes=await source.readAsync(manifestPath,limits.maxManifestBytes,cancellation);}catch(error){if(!missingManifest(error))throw error;cancellation.check();manifestPath='current.json';bytes=await source.readAsync(manifestPath,limits.maxManifestBytes,cancellation);}}catch(error){locatedReadFailure(error,manifestPath);} cancellation.check();
+        const bundle=new Bundle({read: relative => { if(relative!=='Common/current.json'&&relative!=='current.json') throw new ConfigError('UnsupportedCapability','Async-only source'); return bytes; }},limits,cancellation);
         bundle.#source=undefined; bundle.#asyncSource=source; return bundle;
     }
     #read(relative: string, maxBytes: number, cancellation: Cancellation): Uint8Array {
@@ -688,6 +694,7 @@ export class Bundle {
         this.budget?.raw(value.byteLength); return this.#source?new Uint8Array(value):value;
         }catch(error){if(this.budget)locatedReadFailure(error,relative);throw error;}
     }
+    #tablePath(file:string):string{return this.#prefix+(this.#prefix==='Tables/'?(file.endsWith('.json')?'json/':'bytes/'):'')+file;}
     #tableLimit(): number { const limit=this.budget ? Math.min(this.budget.limits.maxTableBytes,this.budget.limits.maxSnapshotBytes-this.budget.readBytes) : Number.MAX_SAFE_INTEGER; if(limit<=0) throw new ConfigError('BudgetExceeded','Snapshot byte budget exceeded'); return limit; }
     /** @internal Validate the complete generated catalog before reading table payloads. */
     validateTables(expected: readonly string[]): void {
@@ -705,7 +712,7 @@ export class Bundle {
         if (!entry || entry.schemaHash !== wire.schema.hash) invalid('表结构不匹配');
         const alternate = this.#format === 'ZrConfig.Mixed/1' && preferJSON;
         const file = alternate ? entry.jsonFile : entry.file, expected = alternate ? entry.jsonSha256 : entry.sha256;
-        const bytes = this.#read('versions/'+this.version+'/'+file,this.#tableLimit(),new Cancellation());
+        const bytes = this.#read(this.#tablePath(file),this.#tableLimit(),new Cancellation());
         if (crypto.createHash('sha256').update(bytes).digest('hex') !== hash(expected)) invalid('文件完整性校验失败');
         const rows = wire.read(bytes, this.#format === 'ZrConfig.Json/1' || alternate);
         if (rows.length !== entry.rows) invalid('行数不匹配'); return rows;
@@ -717,11 +724,11 @@ export class Bundle {
         const alternate=this.#format==='ZrConfig.Mixed/1' && preferJSON;
         const file=alternate?entry.jsonFile:entry.file, expected=alternate?entry.jsonSha256:entry.sha256;
         const limit=this.#tableLimit(); cancellation.check();
-        const relative='versions/'+this.version+'/'+file;let value:Uint8Array;try{value=await this.#asyncSource.readAsync(relative,limit,cancellation);}catch(error){locatedReadFailure(error,relative);} cancellation.check();
+        const relative=this.#tablePath(file);let value:Uint8Array;try{value=await this.#asyncSource.readAsync(relative,limit,cancellation);}catch(error){locatedReadFailure(error,relative);} cancellation.check();
         if(!(value instanceof Uint8Array) || value.byteLength>limit) throw new ConfigError('LimitExceeded','Source returned invalid or oversized bytes');
         this.budget?.raw(value.byteLength); const bytes=new Uint8Array(value);
         if(crypto.createHash('sha256').update(bytes).digest('hex')!==hash(expected)) throw new ConfigError('IntegrityMismatch','Table digest mismatch: '+wire.schema.name);
-        const result=new IndexedRows(wire,bytes,this.#format==='ZrConfig.Json/1'||alternate,this.budget);result.version=this.version;result.relativePath="versions/"+this.version+"/"+file;
+        const result=new IndexedRows(wire,bytes,this.#format==='ZrConfig.Json/1'||alternate,this.budget);result.version=this.version;result.relativePath=this.#tablePath(file);
         if(result.count!==entry.rows) throw new ConfigError('InvalidValue','Row count mismatch'); return result;
     }
     openRows(schema: string, preferJSON: boolean, cancellation = new Cancellation()): IndexedRows {
@@ -729,9 +736,9 @@ export class Bundle {
         if (!entry || entry.schemaHash !== wire.schema.hash) throw new ConfigError('SchemaMismatch', 'Schema mismatch: ' + wire.schema.name);
         const alternate = this.#format === 'ZrConfig.Mixed/1' && preferJSON;
         const file = alternate ? entry.jsonFile : entry.file, expected = alternate ? entry.jsonSha256 : entry.sha256;
-        const bytes = this.#read('versions/'+this.version+'/'+file,this.#tableLimit(),cancellation);
+        const bytes = this.#read(this.#tablePath(file),this.#tableLimit(),cancellation);
         if (crypto.createHash('sha256').update(bytes).digest('hex') !== hash(expected)) throw new ConfigError('IntegrityMismatch', 'Table digest mismatch: ' + wire.schema.name);
-        const result = new IndexedRows(wire, bytes, this.#format === 'ZrConfig.Json/1' || alternate,this.budget);result.version=this.version;result.relativePath="versions/"+this.version+"/"+file;
+        const result = new IndexedRows(wire, bytes, this.#format === 'ZrConfig.Json/1' || alternate,this.budget);result.version=this.version;result.relativePath=this.#tablePath(file);
         if (result.count !== entry.rows) throw new ConfigError('InvalidValue', 'Row count mismatch: ' + wire.schema.name);
         return result;
     }
