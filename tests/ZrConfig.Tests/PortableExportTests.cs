@@ -618,14 +618,16 @@ internal static class PortableExportTests
     {
         // Keep the source list out of CreateProcess's command-line length limit.
         // javac argument files have their own quoting rules, independent of the shell.
-        string file=Path.Combine(root,"javac-"+Guid.NewGuid().ToString("N")+".args");
+        string name="javac-"+Guid.NewGuid().ToString("N")+".args",file=Path.Combine(root,name);
         string Quote(string value)=>"\""+value.Replace("\\","\\\\",StringComparison.Ordinal).Replace("\"","\\\"",StringComparison.Ordinal)
             .Replace("\r","\\r",StringComparison.Ordinal).Replace("\n","\\n",StringComparison.Ordinal).Replace("\t","\\t",StringComparison.Ordinal).Replace("\f","\\f",StringComparison.Ordinal)+"\"";
         try
         {
             File.WriteAllLines(file,arguments.Select(Quote),new System.Text.UTF8Encoding(false));
             // JDK 17 otherwise reads argument files using the platform's default charset.
-            await Run(compiler,["-J-Dfile.encoding=UTF-8","@"+file],root);
+            // Keep the launcher argument ASCII: Windows can replace Unicode in command-line
+            // paths before the JVM starts, independently of the argument file's encoding.
+            await Run(compiler,["-J-Dfile.encoding=UTF-8","@"+name],root);
         }
         finally { File.Delete(file); }
     }
@@ -642,8 +644,9 @@ internal static class PortableExportTests
         await CompileJava(javac,arguments,probe);
         Check(Directory.GetFiles(classes,"*.class").Length==sources.Length+1,"Java 参数文件未编译全部源码。");
         Check(Directory.GetFiles(probe,"javac-*.args").Length==0,"Java 编译后遗留参数文件。");
-        await Run(java,["-cp",classes,"ArgumentFileCheck"],probe);
-        Console.WriteLine("通过：Java 超长源码列表使用参数文件，保留空格、中文和引号路径，并清理临时参数文件。");
+        // The runtime launcher has the same Windows command-line encoding constraint.
+        await Run(java,["-cp",Path.GetRelativePath(probe,classes),"ArgumentFileCheck"],probe);
+        Console.WriteLine("通过：Java 使用 ASCII 相对启动参数与 UTF-8 参数文件，编译超长源码列表并保留空格、中文和引号路径，完成后清理参数文件。");
     }
     private static async Task<string[]> CheckNamespaces(string root,string output,string javac,string java,string go,string cpp)
     {
