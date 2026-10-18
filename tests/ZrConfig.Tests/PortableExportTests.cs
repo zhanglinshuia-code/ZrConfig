@@ -614,6 +614,37 @@ internal static class PortableExportTests
         return result.ToArray();
     }
     private static Task CompileCpp(string compiler,string[] arguments,string root)=>Run(compiler,CppArguments(compiler,arguments),root);
+    private static async Task CompileJava(string compiler,string[] arguments,string root)
+    {
+        // Keep the source list out of CreateProcess's command-line length limit.
+        // javac argument files have their own quoting rules, independent of the shell.
+        string file=Path.Combine(root,"javac-"+Guid.NewGuid().ToString("N")+".args");
+        string Quote(string value)=>"\""+value.Replace("\\","\\\\",StringComparison.Ordinal).Replace("\"","\\\"",StringComparison.Ordinal)
+            .Replace("\r","\\r",StringComparison.Ordinal).Replace("\n","\\n",StringComparison.Ordinal).Replace("\t","\\t",StringComparison.Ordinal).Replace("\f","\\f",StringComparison.Ordinal)+"\"";
+        try
+        {
+            File.WriteAllLines(file,arguments.Select(Quote),new System.Text.UTF8Encoding(false));
+            // JDK 17 otherwise reads argument files using the platform's default charset.
+            await Run(compiler,["-J-Dfile.encoding=UTF-8","@"+file],root);
+        }
+        finally { File.Delete(file); }
+    }
+    private static async Task CheckJavaArgumentFiles(string javac,string java,string root)
+    {
+        string probe=Path.Combine(root,"javac args 空格 # 'quoted'"),classes=Path.Combine(probe,"compiled classes");
+        Directory.CreateDirectory(probe);
+        string[] sources=Enumerable.Range(0,512).Select(i=>Path.Combine(probe,"Source"+i.ToString("D4",CultureInfo.InvariantCulture)+".java")).ToArray();
+        foreach(string source in sources)File.WriteAllText(source,"final class "+Path.GetFileNameWithoutExtension(source)+" {}\n");
+        string main=Path.Combine(probe,"ArgumentFileCheck.java");
+        File.WriteAllText(main,"public class ArgumentFileCheck { public static void main(String[] args) { Object first = new Source0000(), last = new Source0511(); if (first.getClass() == last.getClass()) throw new AssertionError(); } }\n");
+        string[] arguments=["--release","17","-encoding","UTF-8","-d",classes,..sources,main];
+        Check(arguments.Sum(argument=>argument.Length+1)>32767,"Java 参数文件回归必须超过 Windows 命令行长度上限。");
+        await CompileJava(javac,arguments,probe);
+        Check(Directory.GetFiles(classes,"*.class").Length==sources.Length+1,"Java 参数文件未编译全部源码。");
+        Check(Directory.GetFiles(probe,"javac-*.args").Length==0,"Java 编译后遗留参数文件。");
+        await Run(java,["-cp",classes,"ArgumentFileCheck"],probe);
+        Console.WriteLine("通过：Java 超长源码列表使用参数文件，保留空格、中文和引号路径，并清理临时参数文件。");
+    }
     private static async Task<string[]> CheckNamespaces(string root,string output,string javac,string java,string go,string cpp)
     {
         var paths=new List<string>();
@@ -638,7 +669,7 @@ internal static class PortableExportTests
         }
         string main=Path.Combine(root,"TwoCatalogs.java"),classes=Path.Combine(root,"two-java");Directory.CreateDirectory(classes);
         File.WriteAllText(main,"public class TwoCatalogs{public static void main(String[] args)throws Exception{var root=java.nio.file.Path.of(args[0]);var a=gamea.config.DataSnapshot.load(root,gamea.config.ConfigRuntime.LoadPlan.defaults(),new gamea.config.ConfigRuntime.Cancellation());var b=gameb.config.DataSnapshot.load(root,gameb.config.ConfigRuntime.LoadPlan.defaults(),new gameb.config.ConfigRuntime.Cancellation());if(a.get_Entry().get(\"east\",1).getId()!=b.get_Entry().get(\"east\",1).getId())throw new AssertionError();}}");
-        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..paths.SelectMany(p=>Directory.GetFiles(Path.Combine(p,"Java"),"*.java")),main],root);await Run(java,["-cp",classes,"TwoCatalogs",output],root);
+        await CompileJava(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..paths.SelectMany(p=>Directory.GetFiles(Path.Combine(p,"Java"),"*.java")),main],root);await Run(java,["-cp",classes,"TwoCatalogs",output],root);
         string goRoot=Path.Combine(root,"two-go");Directory.CreateDirectory(goRoot);
         File.WriteAllText(Path.Combine(goRoot,"go.mod"),"module consumer\n\ngo 1.19\nrequire (\nexample.invalid/gamea v0.0.0\nexample.invalid/gameb v0.0.0\n)\nreplace example.invalid/gamea => "+JsonSerializer.Serialize(Path.Combine(paths[0],"Go"))+"\nreplace example.invalid/gameb => "+JsonSerializer.Serialize(Path.Combine(paths[1],"Go"))+"\n");
         File.WriteAllText(Path.Combine(goRoot,"main.go"),"package main\nimport(\"context\";\"os\";a \"example.invalid/gamea\";b \"example.invalid/gameb\")\nfunc main(){x,e:=a.LoadData(context.Background(),os.Args[1],a.LoadPlan{});if e!=nil{panic(e)};y,e:=b.LoadData(context.Background(),os.Args[1],b.LoadPlan{});if e!=nil{panic(e)};xt,_:=x.Get_Entry();yt,_:=y.Get_Entry();xr,_:=xt.Get(\"east\",1);yr,_:=yt.Get(\"east\",1);if xr.Id()!=yr.Id(){panic(\"catalog mismatch\")}}\n");
@@ -669,12 +700,13 @@ internal static class PortableExportTests
             Console.WriteLine("跳过原生编译验收：未配置全部工具链；使用 --portable-native 强制验收。");return;
         }
         string java=Path.Combine(Path.GetDirectoryName(javac)!,OperatingSystem.IsWindows()?"java.exe":"java");
+        await CheckJavaArgumentFiles(javac,java,root);
         string javaMain=Path.Combine(root,"NativeCheck.java");File.WriteAllText(javaMain,JavaCheck);
         string classes=Path.Combine(root,"classes");Directory.CreateDirectory(classes);
-        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..Directory.GetFiles(Path.Combine(generated,"Java"),"*.java"),javaMain],root);
+        await CompileJava(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",classes,..Directory.GetFiles(Path.Combine(generated,"Java"),"*.java"),javaMain],root);
         await Run(java,["-cp",classes,"NativeCheck",output],root);
         string javaServer=Path.Combine(root,"ServerCheck.java");File.WriteAllText(javaServer,ServerRuntimeTests.Java);
-        await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-cp",classes,"-d",classes,javaServer],root);
+        await CompileJava(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-cp",classes,"-d",classes,javaServer],root);
         await Run(java,["-cp",classes,"ServerCheck",output],root);
         File.WriteAllText(Path.Combine(generated,"Go","native_test.go"),GoCheck);
         File.WriteAllText(Path.Combine(generated,"Go","server_test.go"),ServerRuntimeTests.Go);
@@ -738,7 +770,7 @@ internal static class PortableExportTests
                 (server?"static Forward000Row row(DataSnapshot value){DataSnapshot.Forward000Table table=value.get_Forward000();return table.get(1);}\nstatic DataSnapshot.Warmup warm(){java.util.function.IntFunction<DataSnapshot.Warmup> call=DataSnapshot::warmupRow_Forward000;return call.apply(1);}\nstatic DataSnapshot.Warmup imported(){return warmupRow_Forward000(1);}\nstatic Forward256Config.Table selected(SelectedSnapshot value){return value.get_Forward256();}\n":"")+
                 "public static void main(String[] args)throws Exception{if(ConfigSnapshot.class.getField(\"Forward000\").getType()!=Forward000Config.Table.class)throw new AssertionError();"+
                 (server?"if(!DataSnapshot.Forward000Row.class.getCanonicalName().equals(\"zrconfig.DataSnapshot.Forward000Row\")||DataSnapshot.class.getMethod(\"warmupRow_Forward000\",int.class).getReturnType()!=DataSnapshot.Warmup.class||DataSnapshot.Forward000Table.class.getMethod(\"get\",int.class).getReturnType()!=DataSnapshot.Forward000Row.class)throw new AssertionError();":"")+"var root=java.nio.file.Path.of(args[0]);check(ConfigSnapshot.load(root,true).Forward000.get(1).getPeer().getPeer().getId()==1);"+(server?LargeJavaBoundary:"")+"}\n}\n");
-            await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",javaClasses,..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java"),javaConsumer],root);
+            await CompileJava(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",javaClasses,..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java"),javaConsumer],root);
             await Run(java,["-cp",javaClasses,"Boundary",boundaryOutput],root);
             File.WriteAllText(Path.Combine(boundary,"Go","boundary_test.go"),"package zrconfig\nimport (\"testing\""+(server?";\"context\"":"")+")\nfunc TestLargeBoundary(t *testing.T){root:="+JsonSerializer.Serialize(boundaryOutput)+";legacy,err:=LoadConfig(root,true);if err!=nil{t.Fatal(err)};if legacy.Forward000().Get(1).Peer().Peer().Id()!=1{t.Fatal(\"legacy reference cycle\")};"+(server?LargeGoBoundary:"")+"}\n");
             await Run(go,["test","."],Path.Combine(boundary,"Go"),new(){["GO111MODULE"]="off",["GOCACHE"]=Path.Combine(root,"gocache")});
@@ -751,7 +783,7 @@ internal static class PortableExportTests
             var sources=new Dictionary<string,string>(StringComparer.Ordinal);
             NativeGenerator.Generate([],ExportOptions.Languages(["all"]),sources,GeneratedSymbolPlan.Create([],[],ExportOptions.Languages(["all"]),server));
             foreach(var file in sources){string path=Path.Combine(boundary,file.Key);Directory.CreateDirectory(Path.GetDirectoryName(path)!);File.WriteAllText(path,file.Value);}
-            await Run(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",Path.Combine(boundary,"classes"),..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java")],root);
+            await CompileJava(javac,["--release","17","-Xlint:unchecked,deprecation","-Werror","-encoding","UTF-8","-d",Path.Combine(boundary,"classes"),..Directory.GetFiles(Path.Combine(boundary,"Java"),"*.java")],root);
             await Run(go,["test","."],Path.Combine(boundary,"Go"),new(){["GO111MODULE"]="off",["GOCACHE"]=Path.Combine(root,"gocache")});
             string include=Path.Combine(boundary,"check.cpp");File.WriteAllText(include,"#include \""+(server?"data.hpp":"snapshot.hpp")+"\"\nint main(){return 0;}\n");
             await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(boundary,"Cpp"),include,"-o",Path.Combine(boundary,"check")],root);
@@ -770,7 +802,7 @@ internal static class PortableExportTests
         var diagnostics = new DiagnosticCollector();
         Check(ModelGenerator.Generate(nameData, nameCode, diagnostics, languages: ["go", "java"]), string.Join("\n", diagnostics.Snapshot()));
         await Run(go, ["test", "."], Path.Combine(nameCode, "Generated", "Go"), new() { ["GO111MODULE"] = "off", ["GOCACHE"] = Path.Combine(root, "gocache") });
-        await Run(javac, ["--release", "17", "-encoding", "UTF-8", "-d", Path.Combine(names, "classes"), .. Directory.GetFiles(Path.Combine(nameCode, "Generated", "Java"), "*.java")], root);
+        await CompileJava(javac, ["--release", "17", "-encoding", "UTF-8", "-d", Path.Combine(names, "classes"), .. Directory.GetFiles(Path.Combine(nameCode, "Generated", "Java"), "*.java")], root);
     }
     private static async Task Run(string file,string[] arguments,string directory,Dictionary<string,string>? environment=null)
     {
