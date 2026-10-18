@@ -41,6 +41,8 @@ Git clones may use `-- --trusted-ref <trusted-commit-SHA>` to compare API baseli
 
 [Public CI](../.github/workflows/ci.yml) defines minimum/current Windows/Linux/macOS matrices and retains logs. Matrix configuration, one local pass, and actual cross-platform passes are distinct. Current results are the commit's Actions checks. See [server performance acceptance](#seven-language-server-performance-acceptance).
 
+On Windows, the C++ large-catalog checks enable `-Wa,-mbig-obj` for MinGW and `/bigobj` for MSVC so the 257-table generated consumer can exceed the ordinary COFF section limit. The ordinary executable verifies allocation-free queries. ASan/UBSan and TSan executables let the sanitizer own allocation interception while retaining the same query, lifecycle, and concurrency assertions; they neither redefine global `new/delete` nor report that run as an allocation measurement.
+
 Full verification, individual/internal checks, and Unity maintenance below target the full workspace; public downloads omit those projects/smoke scripts.
 
 ## Full verification

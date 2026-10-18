@@ -1127,7 +1127,11 @@ public static class ServerConsumer {
         #include <thread>
         #include <cstdlib>
         #include <new>
-        static std::atomic<std::size_t> server_allocations{0};static volatile std::int32_t server_sink;
+        static volatile std::int32_t server_sink;
+        // Sanitizers own new/delete interception. Allocation counts are verified
+        // by the ordinary executable, which runs before each sanitized executable.
+        #ifndef ZRCONFIG_SANITIZED_TEST
+        static std::atomic<std::size_t> server_allocations{0};
         #if defined(__GNUC__)
         __attribute__((noinline))
         #endif
@@ -1139,6 +1143,7 @@ public static class ServerConsumer {
         void operator delete(void* p)noexcept{std::free(p);}void* operator new[](std::size_t n){return ::operator new(n);}void operator delete[](void* p)noexcept{::operator delete(p);}
         void operator delete(void* p,std::size_t)noexcept{::operator delete(p);}
         void operator delete[](void* p,std::size_t)noexcept{::operator delete[](p);}
+        #endif
         using namespace zrconfig;
         void check(bool value) { if (!value) throw std::runtime_error("server assertion failed"); }
         template<class F> void fails(ErrorCode code, F&& f) { try { f(); } catch (const ConfigError& e) { check(e.code == code); return; } throw std::runtime_error("expected server error"); }
@@ -1204,7 +1209,18 @@ public static class ServerConsumer {
               struct Counting:ConfigSource{int reads=0;std::vector<std::uint8_t> read(const std::string&,std::uint64_t,const Cancellation&)override{++reads;throw std::logic_error("must not read");}} source;
               LoadPlan plan;plan.tables=std::vector<std::string>{"Lookup"};fails(ErrorCode::InvalidPlan,[&]{data::Snapshot::load_with_warmup(source,LoadSettings(plan),{data::Snapshot::warmup_row_Entry("east",1)},token);});check(source.reads==0);
             }
-            for(bool json:{false,true}){LoadPlan plan;plan.prefer_json=json;auto snapshot=data::Snapshot::load(argv[1],plan,token);std::string key="east";auto before=server_allocations.load();for(int i=0;i<100000;++i){auto row=snapshot->get_Entry(key,1);auto group=snapshot->find_group_Entry_ById(1);auto target=row.get_Lookup();auto peer=target->get_Peer();auto back=peer->get_Peer();auto expected=snapshot->get_Lookup(10);check(&back->borrow()==&expected.borrow());server_sink=row.Id()+static_cast<std::int32_t>(group.size());}check(server_allocations.load()==before);std::cout<<"通过：C++ 新服务器主键、分组及双向引用 100000 次查询分配 0 次。"<<std::endl;}
+            for(bool json:{false,true}){
+              LoadPlan plan;plan.prefer_json=json;auto snapshot=data::Snapshot::load(argv[1],plan,token);std::string key="east";
+              #ifndef ZRCONFIG_SANITIZED_TEST
+              auto before=server_allocations.load();
+              #endif
+              for(int i=0;i<100000;++i){auto row=snapshot->get_Entry(key,1);auto group=snapshot->find_group_Entry_ById(1);auto target=row.get_Lookup();auto peer=target->get_Peer();auto back=peer->get_Peer();auto expected=snapshot->get_Lookup(10);check(&back->borrow()==&expected.borrow());server_sink=row.Id()+static_cast<std::int32_t>(group.size());}
+              #ifndef ZRCONFIG_SANITIZED_TEST
+              check(server_allocations.load()==before);std::cout<<"通过：C++ 新服务器主键、分组及双向引用 100000 次查询分配 0 次。"<<std::endl;
+              #else
+              std::cout<<"通过：C++ sanitizer 下主键、分组及双向引用 100000 次查询。"<<std::endl;
+              #endif
+            }
             for(bool json:{false,true})for(auto mode:{LoadMode::ServerDefault,LoadMode::SelectedTables,LoadMode::LazyRowsStrict,LoadMode::LazyRowsOnAccess}){
               LoadPlan plan;plan.mode=mode;plan.tables=std::vector<std::string>{"Entry"};plan.prefer_json=json;
               auto snapshot=data::Snapshot::load(std::string(argv[1])+"-selected",plan,token);check(snapshot->catalog_fingerprint().size()==64);if(mode==LoadMode::LazyRowsOnAccess)check(snapshot->load_plan_fingerprint()==(json?"c55af6527720622add35286774df8dd1cf6e8eda7537d04aa1ee2eef94f31d91":"a3fe29f4e2fb7a9cc160a8a474905d5c40bb7f57179f9651f08a8967455785d1"));

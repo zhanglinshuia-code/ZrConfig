@@ -280,8 +280,16 @@ internal static class PortableExportTests
 
     internal static string[] CppArguments(string compiler,IReadOnlyList<string> arguments)
     {
-        if(!Path.GetFileNameWithoutExtension(compiler).Equals("cl",StringComparison.OrdinalIgnoreCase))return arguments.ToArray();
-        var result=new List<string>{"/nologo","/std:c++17","/EHsc","/utf-8","/permissive-","/Zc:__cplusplus","/Zc:preprocessor","/W4","/WX"};
+        string name=Path.GetFileNameWithoutExtension(compiler);
+        if(!name.Equals("cl",StringComparison.OrdinalIgnoreCase))
+        {
+            // Large generated catalogs exceed the ordinary PE/COFF section limit.
+            // Clang selects big objects automatically; MinGW's assembler needs this flag.
+            if(OperatingSystem.IsWindows()&&(name.Equals("g++",StringComparison.OrdinalIgnoreCase)||name.EndsWith("-g++",StringComparison.OrdinalIgnoreCase)))
+                return ["-Wa,-mbig-obj",..arguments];
+            return arguments.ToArray();
+        }
+        var result=new List<string>{"/nologo","/std:c++17","/EHsc","/utf-8","/permissive-","/Zc:__cplusplus","/Zc:preprocessor","/bigobj","/W4","/WX"};
         for(int i=0;i<arguments.Count;i++)
         {
             string arg=arguments[i];
@@ -381,7 +389,7 @@ internal static class PortableExportTests
         {
             if(sanitizers is not ("address,undefined" or "thread"))throw new InvalidOperationException("Unknown C++ sanitizer selection.");
             string sanitized=Path.Combine(root,"server-sanitized");
-            await CompileCpp(cpp,["-std=c++17","-O1","-g","-fno-omit-frame-pointer","-fsanitize="+sanitizers,"-pthread","-I",Path.Combine(generated,"Cpp"),serverMain,"-o",sanitized],root);
+            await CompileCpp(cpp,["-std=c++17","-O1","-g","-fno-omit-frame-pointer","-fsanitize="+sanitizers,"-DZRCONFIG_SANITIZED_TEST","-pthread","-I",Path.Combine(generated,"Cpp"),serverMain,"-o",sanitized],root);
             await Run(sanitized,[output],root,new(){["UBSAN_OPTIONS"]="halt_on_error=1:print_stacktrace=1",["ASAN_OPTIONS"]="halt_on_error=1",["TSAN_OPTIONS"]="halt_on_error=1"});
         }
 
