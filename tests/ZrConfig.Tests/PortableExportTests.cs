@@ -613,7 +613,7 @@ internal static class PortableExportTests
         }
         return result.ToArray();
     }
-    private static Task CompileCpp(string compiler,string[] arguments,string root)=>Run(compiler,CppArguments(compiler,arguments),root);
+    private static Task CompileCpp(string compiler,string[] arguments,string root,TimeSpan? timeout=null)=>Run(compiler,CppArguments(compiler,arguments),root,timeout:timeout);
     private static async Task CompileJava(string compiler,string[] arguments,string root)
     {
         // Keep the source list out of CreateProcess's command-line length limit.
@@ -765,7 +765,11 @@ internal static class PortableExportTests
             File.WriteAllText(Path.Combine(boundaryOutput,"current.json"),JsonSerializer.Serialize(new{format="ZrConfig.Json/1",target="C",versionId="boundary",createdUtc="2026-10-16T00:00:00Z",codeFingerprint=new string('A',64),tables=entries}));
             string include=Path.Combine(boundary,"forward.cpp"),binary=Path.Combine(boundary,OperatingSystem.IsWindows()?"forward.exe":"forward");
             File.WriteAllText(include,"#include \"Forward000Config.hpp\"\nzrconfig::Forward256Config* other=nullptr;\n#include \""+(server?"data.hpp":"snapshot.hpp")+"\"\n#include <cassert>\nint main(int,char** argv){assert(other==nullptr);std::filesystem::path root(argv[1]);auto legacy=zrconfig::ConfigSnapshot::load(root,true);assert(legacy->Forward000().get(1).Peer()->Peer()->Id()==1);"+(server?LargeCppBoundary:"")+"}\n");
-            await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(boundary,"Cpp"),include,"-o",binary],root);
+            // MinGW needs more than the ordinary process budget for the 257-table server TU.
+            var compileWatch=Stopwatch.StartNew();
+            Console.WriteLine($"开始 C++ 大表编译：{Path.GetFileName(boundary)}；编译器={cpp}；上限=600 秒。");
+            await CompileCpp(cpp,["-std=c++17","-Wall","-Wextra","-pedantic","-Werror","-I",Path.Combine(boundary,"Cpp"),include,"-o",binary],root,TimeSpan.FromMinutes(10));
+            Console.WriteLine($"完成 C++ 大表编译：{Path.GetFileName(boundary)}；耗时={compileWatch.Elapsed.TotalSeconds:F1} 秒。");
             await Run(binary,[boundaryOutput],root);
             string javaConsumer=Path.Combine(boundary,"Boundary.java"),javaClasses=Path.Combine(boundary,"classes");
             File.WriteAllText(javaConsumer,"import zrconfig.*;\nimport static zrconfig.ConfigRuntime.*;\n"+(server?"import zrconfig.DataSnapshot.Forward000Row;\nimport static zrconfig.DataSnapshot.warmupRow_Forward000;\n":"")+"public class Boundary {\nstatic void check(boolean value){if(!value)throw new AssertionError();}\n"+
@@ -807,14 +811,23 @@ internal static class PortableExportTests
         await Run(go, ["test", "."], Path.Combine(nameCode, "Generated", "Go"), new() { ["GO111MODULE"] = "off", ["GOCACHE"] = Path.Combine(root, "gocache") });
         await CompileJava(javac, ["--release", "17", "-encoding", "UTF-8", "-d", Path.Combine(names, "classes"), .. Directory.GetFiles(Path.Combine(nameCode, "Generated", "Java"), "*.java")], root);
     }
-    private static async Task Run(string file,string[] arguments,string directory,Dictionary<string,string>? environment=null)
+    private static async Task Run(string file,string[] arguments,string directory,Dictionary<string,string>? environment=null,TimeSpan? timeout=null)
     {
         var start=new ProcessStartInfo(file){WorkingDirectory=directory,RedirectStandardOutput=true,RedirectStandardError=true,UseShellExecute=false};
         foreach(string arg in arguments)start.ArgumentList.Add(arg);
         if(environment!=null)foreach(var p in environment)start.Environment[p.Key]=p.Value;
         using var process=Process.Start(start)??throw new Exception("进程启动失败："+file);
         Task<string> stdout=process.StandardOutput.ReadToEndAsync(),stderr=process.StandardError.ReadToEndAsync();
-        try{await process.WaitForExitAsync().WaitAsync(TimeSpan.FromMinutes(3));}catch{process.Kill(true);throw;}
+        TimeSpan limit=timeout??TimeSpan.FromMinutes(3);
+        try{await process.WaitForExitAsync().WaitAsync(limit);}
+        catch(TimeoutException error)
+        {
+            try{process.Kill(true);}catch(InvalidOperationException)when(process.HasExited){}
+            await process.WaitForExitAsync();
+            string output=await stdout+await stderr;
+            throw new TimeoutException($"进程超过 {limit.TotalSeconds:F0} 秒：{file}\n工作目录：{directory}\n参数：{string.Join(' ',arguments)}\n"+output[^Math.Min(output.Length,8192)..],error);
+        }
+        catch{if(!process.HasExited)process.Kill(true);throw;}
         string text=await stdout+await stderr;Check(process.ExitCode==0,file+"\n"+text);Console.WriteLine(text.Trim());
     }
     private const string JavaCheck = """
